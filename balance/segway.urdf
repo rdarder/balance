@@ -1,0 +1,237 @@
+<robot name="segway">
+    <!-- Chassis -->
+    <link name="chassis">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.0026" />
+            <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <box size="0.08 0.022 0.09" />
+            </geometry>
+            <material name="grey">
+                <color rgba="0.5 0.5 0.5 0.8" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <box size="0.08 0.022 0.09" />
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- Battery (Fixed to Chassis) -->
+    <link name="battery">
+        <inertial>
+            <mass value="0.047" />
+            <origin xyz="0 0 0" />
+            <inertia ixx="0.00002" ixy="0" ixz="0" iyy="0.00002" iyz="0" izz="0.000002" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <cylinder radius="0.009" length="0.065" />
+            </geometry>
+            <material name="green">
+                <color rgba="0 1 0 0.8" />
+            </material>
+        </visual>
+        <!-- No collision for battery -->
+    </link>
+    <joint name="battery_on_chassis" type="fixed">
+        <parent link="chassis" />
+        <child link="battery" />
+        <origin xyz="0 0 -0.032" rpy="0 1.5708 0" />
+    </joint>
+
+    <!-- Motor Cases (Fixed to Chassis) -->
+    <link name="left_motor_case">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.017" />
+            <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <box size="0.025 0.015 0.020" />
+            </geometry>
+            <material name="blue">
+                <color rgba="0 0 1 0.8" />
+            </material>
+        </visual>
+        <!-- No collision for motor cases -->
+    </link>
+    <joint name="left_motor_case_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="left_motor_case" />
+        <origin xyz="-0.028 0.001 -0.005" rpy="0 0 0" />
+    </joint>
+
+    <link name="right_motor_case">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.017" />
+            <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <box size="0.025 0.015 0.020" />
+            </geometry>
+            <material name="blue" />
+        </visual>
+        <!-- No collision for motor cases -->
+    </link>
+    <joint name="right_motor_case_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="right_motor_case" />
+        <origin xyz="0.028 0.001 -0.005" rpy="0 0 0" />
+    </joint>
+
+    <!-- IMU LINK -->
+    <link name="imu">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.002" />
+            <inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <geometry>
+                <box size="0.015 0.015 0.003" />
+            </geometry>
+            <material name="red">
+                <color rgba="1 0 0 0.9" />
+            </material>
+        </visual>
+        <!-- No collision for IMU -->
+    </link>
+    <joint name="imu_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="imu" />
+        <origin xyz="0 0 0.035" rpy="0 0 0" />
+    </joint>
+
+    <!-- ********** NEW CIRCUITS LINK ********** -->
+    <link name="circuits_link">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" /> <!-- Inertia relative to link origin -->
+            <mass value="0.010" /> <!-- 10 grams -->
+            <!-- Approximate inertia for the box shape, or use small values -->
+            <!-- ixx = (1/12)*m*(y^2+z^2) = (1/12)*0.01*(0.003^2+0.015^2) = 1.95e-8 -->
+            <!-- iyy = (1/12)*m*(x^2+z^2) = (1/12)*0.01*(0.070^2+0.015^2) = 4.27e-6 -->
+            <!-- izz = (1/12)*m*(x^2+y^2) = (1/12)*0.01*(0.070^2+0.003^2) = 4.09e-6 -->
+            <!-- Using slightly simplified small values for stability -->
+            <inertia ixx="1e-7" ixy="0" ixz="0" iyy="4e-6" iyz="0" izz="4e-6" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0" /> <!-- Visual relative to link origin -->
+            <geometry>
+                <!-- Box representing the circuits -->
+                <box size="0.070 0.003 0.015" />
+            </geometry>
+            <material name="purple"> <!-- Make it visible for debugging -->
+                <color rgba="0.5 0 0.5 0.8" />
+            </material>
+        </visual>
+        <!-- No collision element needed as it's inside the chassis -->
+    </link>
+
+    <joint name="circuits_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="circuits_link" />
+        <!-- Position the circuits link relative to the chassis origin -->
+        <!-- Centered X, y=5mm, z=25mm -->
+        <origin xyz="0 0.005 0.025" rpy="0 0 0" />
+    </joint>
+    <!-- ********** END NEW CIRCUITS LINK ********** -->
+
+
+    <!-- Left Wheel -->
+    <link name="left_wheel">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.017" />
+            <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <cylinder radius="0.027" length="0.012" />
+            </geometry>
+            <material name="black">
+                <color rgba="0 0 0 0.8" />
+            </material>
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <cylinder radius="0.027" length="0.012" />
+            </geometry>
+            <contact_coefficients lateral_friction="1.0" spinning_friction="0.005" rolling_friction="0.01"/>
+        </collision>
+    </link>
+
+    <!-- Right Wheel -->
+    <link name="right_wheel">
+        <inertial>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <mass value="0.017" />
+            <inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <cylinder radius="0.027" length="0.012" />
+            </geometry>
+            <material name="black" />
+        </visual>
+        <collision>
+            <origin xyz="0 0 0" />
+            <geometry>
+                <cylinder radius="0.027" length="0.012" />
+            </geometry>
+            <contact_coefficients lateral_friction="1.0" spinning_friction="0.005" rolling_friction="0.01"/>
+        </collision>
+    </link>
+
+    <!-- Wheel Joints -->
+    <joint name="left_drive" type="continuous">
+        <parent link="chassis" />
+        <child link="left_wheel" />
+        <origin xyz="-0.048 0.001 -0.021" rpy="0 1.5708 0" />
+        <axis xyz="0 0 -1" />
+    </joint>
+
+    <joint name="right_drive" type="continuous">
+        <parent link="chassis" />
+        <child link="right_wheel" />
+        <origin xyz="0.048 0.001 -0.021" rpy="0 1.5708 0" />
+        <axis xyz="0 0 -1" />
+    </joint>
+
+    <!-- Define materials -->
+    <material name="grey">
+        <color rgba="0.5 0.5 0.5 0.8" />
+    </material>
+    <material name="green">
+        <color rgba="0 1 0 0.8" />
+    </material>
+    <material name="blue">
+        <color rgba="0 0 1 0.8" />
+    </material>
+    <material name="black">
+        <color rgba="0 0 0 0.8" />
+    </material>
+    <material name="red">
+        <color rgba="1 0 0 0.9" />
+    </material>
+    <material name="purple"> <!-- Added purple material -->
+        <color rgba="0.5 0 0.5 0.8" />
+    </material>
+
+</robot>

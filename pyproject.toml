@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"] # Specifies the build tool (setuptools)
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "balance" # Choose a name for your project
+version = "0.1.0" # Initial version
+description = "A project for simulating balance with MuJoCo." # Optional description
+readme = "README.md" # Optional: if you have a README
+requires-python = ">=3.8" # Specify compatible Python versions
+dependencies = [
+    "mujoco",
+    # Add other direct dependencies here as needed
+]
