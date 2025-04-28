@@ -12,26 +12,32 @@ data = mujoco.MjData(model)
 left_motor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "left-motor")
 right_motor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "right-motor")
 
-# Define the desired initial control signal corresponding to your desired torque
-# Since Torque = gear * ctrl, then ctrl = Desired_Torque / gear
-desired_initial_torque = 0.01  # Example: 0.001 Nm
-gear = 0.0096  # Your gear value
-initial_ctrl_signal = desired_initial_torque / gear
+# very rough script that makes the segway stand up and land gracefully.
+# just for vibe checking that the friction parameters and sim timing are about right.
 
-# Apply to the control array
-if left_motor_id != -1:
-    data.ctrl[left_motor_id] = initial_ctrl_signal
-if right_motor_id != -1:
-    data.ctrl[right_motor_id] = initial_ctrl_signal
-# Or if you know they are the first two actuators:
-# data.ctrl[0] = initial_ctrl_signal
-# data.ctrl[1] = initial_ctrl_signal
-
+initial_ctrl_signal = 1.0
+reverse_ctrl_signal = -0.5
 # --- Launch viewer or run simulation loop ---
 with mujoco.viewer.launch_passive(model, data) as viewer:
+    started = time.time()
     while viewer.is_running():
         step_start = time.time()
+        elapsed = step_start - started
+        if elapsed > 2.5:
+            data.ctrl[left_motor_id] = 0
+            data.ctrl[right_motor_id] = 0
+        elif elapsed > 2.45:
+            data.ctrl[left_motor_id] = reverse_ctrl_signal
+            data.ctrl[right_motor_id] = reverse_ctrl_signal
+        elif elapsed > 2.0:
+            data.ctrl[left_motor_id] = initial_ctrl_signal
+            data.ctrl[right_motor_id] = initial_ctrl_signal
+
         mujoco.mj_step(model, data)  # Apply the torque set in data.ctrl
+
+        time_until_next_step = model.opt.timestep - (time.time() - step_start)
+        if time_until_next_step > 0:
+            time.sleep(time_until_next_step)
         viewer.sync()
         # ... rest of your loop ...
 
