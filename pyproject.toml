@@ -10,5 +10,7 @@ readme = "README.md" # Optional: if you have a README
 requires-python = ">=3.8" # Specify compatible Python versions
 dependencies = [
     "mujoco",
+    "gymnasium",
+    "numpy",
     # Add other direct dependencies here as needed
 ]

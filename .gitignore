@@ -1,2 +1,4 @@
 venv/
 .idea/
+balance.egg-info
+scripts/MUJOCO_LOG.TXT
