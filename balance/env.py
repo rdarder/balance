@@ -1,6 +1,8 @@
 import gymnasium as gym
 import numpy as np
 import mujoco
+import math  # Import math for trigonometric functions
+from scipy.spatial.transform import Rotation as R
 
 from balance.checks import check_state
 
@@ -15,10 +17,12 @@ class SegwayEnv(gym.Env):
         model: mujoco.MjModel,
         timestep=0.002,
         frame_skip=20,
+        max_init_pitch_angle_rad=1.8,  # Add parameter for pitch range
     ):
         super().__init__()
         self._model = model
         self._model_data = mujoco.MjData(self._model)
+        self._max_init_pitch_angle_rad = max_init_pitch_angle_rad
 
         # Set simulation options (can override XML)
         self._timestep = timestep
@@ -45,10 +49,6 @@ class SegwayEnv(gym.Env):
         )
         check_state(self._imu_gyro_id != -1, "IMU gyro not found in model")
 
-        # Store initial state for reset (optional, mj_resetData is standard)
-        self._initial_qpos = np.copy(self._model_data.qpos)
-        self._initial_qvel = np.copy(self._model_data.qvel)
-
         # --- Environment Spaces ---
         # Action space: [left_motor_pwm_duty_cycle, right_motor_pwm_duty_cycle]
         self.action_space = gym.spaces.Box(
@@ -56,143 +56,157 @@ class SegwayEnv(gym.Env):
         )
 
         # Observation space: [imu_accel (3), imu_gyro (3), desired_speed (1), desired_turn (1)]
-        # Note: Bounds for IMU are technically unbounded, desired commands are [-1, 1]
-        # We use -inf/inf for simplicity of the Box space definition, but be mindful of this.
         obs_dim = 6 + 2  # IMU (accel+gyro) + desired_speed + desired_turn
         self.observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
 
         # --- Internal State for Desired Commands ---
-        # These represent the commands the agent is trying to follow.
-        # They need to be set externally (e.g., by the training loop)
         self._desired_speed = 0.0
         self._desired_turn = 0.0
 
         # --- Viewer (Optional) ---
         self.viewer = None
 
+        # --- Constants for Reset ---
+        # Calculate required Z height based on XML values
+        # Wheel Z offset relative to chassis: -0.025
+        # Wheel radius: 0.0265
+        self._target_init_z = 0.0265 + 0.025  # = 0.0515
+
+        # --- Internal State for Truncation ---
+        self._total_steps = 0
+
     def set_movement_commands(self, speed: float, turn: float):
         """Sets the desired speed and turn commands for the agent to follow."""
-        # Clamp commands to [-1, 1] as per your description
         self._desired_speed = np.clip(speed, -1.0, 1.0)
         self._desired_turn = np.clip(turn, -1.0, 1.0)
 
     def _get_obs(self) -> np.ndarray:
         """Collects the current observation."""
-        # Get IMU data from sensors
         imu_accel = self._model_data.sensordata[
             self._imu_accel_id : self._imu_accel_id + 3
         ]
         imu_gyro = self._model_data.sensordata[
             self._imu_gyro_id : self._imu_gyro_id + 3
         ]
-
-        # Concatenate IMU data with desired commands
         obs = np.concatenate(
             [
                 imu_accel,
                 imu_gyro,
-                [self._desired_speed],  # Include desired speed
-                [self._desired_turn],  # Include desired turn
+                [self._desired_speed],
+                [self._desired_turn],
             ]
         ).astype(np.float32)
-
         return obs
 
     def reset(self, seed=None, options=None):
-        # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
-        # Reset the MuJoCo simulation data
+        # Reset the MuJoCo simulation data to initial XML state first
         mujoco.mj_resetData(self._model, self._model_data)
 
-        # Optional: Perturb initial state slightly for robustness
-        # e.g., self.data.qpos += self.np_random.uniform(low=-.005, high=.005, size=self.model.nq)
-        # mujoco.mj_forward(self.model, self.data) # Need to call forward after changing qpos/qvel
+        # Set qpos
+        self._model_data.qpos[:] = self.get_initial_pose()
+        self._model_data.qvel[0:3] = self._get_initial_velocity()
+        self._model_data.qvel[3:] = 0.0  # No angular velocity
 
-        # Reset desired commands (e.g., to zero, or sample a new target)
+        # --- Crucial: Forward dynamics ---
+        # Apply the new qpos/qvel and compute derived quantities (like sensor readings)
+        mujoco.mj_forward(self._model, self._model_data)
+        # ---------------------------------
+
+        # Reset desired commands (sample new random targets for the episode)
         self._desired_speed = self.np_random.uniform(-1, 1)
         self._desired_turn = self.np_random.uniform(-1, 1)
 
-        # Get the initial observation
+        # Get the initial observation based on the new state
         observation = self._get_obs()
 
-        # Return observation and info dictionary (standard for Gymnasium)
-        info = {}  # Can include debugging info here
+        # Reset internal state
+        self._total_steps = 0
+
+        info = {}
         return observation, info
 
-    def step(self, action):
-        # Ensure action is within bounds (RL algorithms usually handle this, but good practice)
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+    def _get_initial_velocity(self):
+        # Set qvel (velocities) to a random value in the direction of the wheels
+        random_speed = self._get_initial_speed()
+        yaw_angle = self._model_data.qpos[
+            6
+        ]  # Yaw angle is the last element of the orientation quaternion
+        # Calculate the x and y components of the velocity based on the yaw angle
+        vel_x = random_speed * math.cos(yaw_angle)
+        vel_y = random_speed * math.sin(yaw_angle)
+        vel = vel_x, vel_y, 0.0
+        return vel
 
-        # Apply the action to the motor controls
+    def _get_initial_speed(self):
+        min_speed = -0.5
+        max_speed = 0.5
+        random_speed = self.np_random.uniform(min_speed, max_speed)
+        return random_speed
+
+    def get_initial_pose(self):
+        qpos = np.zeros(self._model.nq)
+        qpos[0] = 0.0  # Initial x position
+        qpos[1] = 0.0  # Initial y position
+        qpos[2] = self._target_init_z  # Set calculated z height
+        qpos[3:7] = self.get_initial_orientation()  # Set calculated orientation
+        return qpos
+
+    def get_initial_orientation(self):
+        # --- Set Random Initial Pose ---
+        # 1. Random Pitch Angle (around World Y)
+        max_init_pitch_angle_rad = math.pi / 6
+        pitch_angle = self.np_random.uniform(
+            -max_init_pitch_angle_rad, max_init_pitch_angle_rad
+        )
+        # 2. Random Yaw Angle (around World Z)
+        yaw_angle = self.np_random.uniform(-math.pi, math.pi)
+        # 3. Roll angle is zero (around World X)
+        roll_angle = 0.0
+
+        # --- Calculate Orientation Quaternion using scipy ---
+        # Use 'zyx' convention (lowercase = extrinsic): Apply Yaw (Z), then Pitch (Y), then Roll (X)
+        # Angles are given in [yaw, pitch, roll] order for 'zyx'
+        euler_angles = [yaw_angle, pitch_angle, roll_angle]
+        rotation = R.from_euler(
+            "zyx", euler_angles, degrees=False
+        )  # Use False since angles are in radians
+
+        # Get quaternion. Scipy returns in [x, y, z, w] format by default.
+        quat_xyzw = rotation.as_quat()
+
+        # Convert to [w, x, y, z] format if needed by your simulation/framework
+        orientation = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+
+        return orientation
+
+    def step(self, action):
+        action = np.clip(action, self.action_space.low, self.action_space.high)
         self._model_data.ctrl[self._left_motor_id] = action[0]
         self._model_data.ctrl[self._right_motor_id] = action[1]
 
-        # --- Simulate physics ---
-        # Run mj_step multiple times for frame skipping
         for _ in range(self._frame_skip):
             mujoco.mj_step(self._model, self._model_data)
-            # Optional: Check for termination/truncation *within* frame skip if needed
-            # e.g., if self._is_terminated(): break
+            # Potential early termination check inside loop if needed
+        self._total_steps += 1
 
-        # --- Get next observation ---
         observation = self._get_obs()
 
         # --- Calculate reward ---
-        # THIS IS WHERE YOU DEFINE YOUR REWARD FUNCTION
-        # Access simulator state via self.data
-        # Examples:
-        # chassis_height = self.data.qpos[2] # Assuming free joint qpos is [x, y, z, qw, qx, qy, qz]
-        # chassis_orientation = self.data.qpos[3:7] # Quaternion
-        # chassis_angular_vel = self.data.qvel[3:6] # Angular velocity
-        # chassis_linear_vel = self.data.qvel[0:3] # Linear velocity
-        # wheel_vel_left = self.data.qvel[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "left-wheel-joint")]
-        # wheel_vel_right = self.data.qvel[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "right-wheel-joint")]
-
-        reward = 0.0  # Placeholder: Implement your reward logic here
+        reward = 0.0  # Placeholder
 
         # --- Check for termination or truncation ---
-        # Define conditions for ending an episode
-        # Examples:
-        # - Robot falls over (chassis angle too large)
-        # - Chassis height too low
-        # - Simulation time exceeds a limit (truncation)
+        terminated = False
+        truncated = False
 
-        terminated = (
-            False  # Set to True if the episode ends due to failure (e.g., falling)
-        )
-        truncated = False  # Set to True if the episode ends due to time limit or other non-failure reason
-
-        # Example termination condition (falling over):
-        # Get chassis orientation (quaternion)
-        chassis_quat = self._model_data.qpos[3:7]
-        # Convert quaternion to Euler angles or check vertical vector
-        # A simple check: is the Z-axis of the chassis pointing mostly up?
-        # Get the Z-axis vector in world coordinates from the chassis body's orientation
-        # This requires accessing the body's orientation matrix, which is in data.xmat
+        # Example termination: Check if fallen over
         chassis_body_id = mujoco.mj_name2id(
             self._model, mujoco.mjtObj.mjOBJ_BODY, "chassis"
         )
-        # if chassis_body_id != -1:
-        #     chassis_z_axis_world = self._model_data.xmat[chassis_body_id].reshape(3, 3)[
-        #         :, 2
-        #     ]
-        #     # Check if the dot product with world Z-axis (0,0,1) is below a threshold
-        #     # A dot product of 1 means perfectly upright, 0 means horizontal, -1 means upside down
-        #     upright_threshold = 0.5  # Example: roughly 60 degrees tilt
-        #     if chassis_z_axis_world[2] < upright_threshold:
-        #         terminated = True
-
-        # Example truncation condition (time limit):
-        # max_episode_steps = 500 # Define this in __init__ or as a parameter
-        # if self.data.time >= max_episode_steps * self.model.opt.timestep * self.frame_skip:
-        #     truncated = True
-
-        # --- Info dictionary ---
-        info = {}  # Can add debugging info, e.g., info = {"chassis_height": chassis_height}
-
+        info = {}
         return observation, reward, terminated, truncated, info
 
     def close(self):

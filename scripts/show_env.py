@@ -1,6 +1,9 @@
 # --- Example Usage (for testing the environment) ---
 import time
+from dataclasses import dataclass
+
 import mujoco
+import tyro
 import mujoco.viewer
 import numpy as np
 
@@ -8,7 +11,15 @@ from balance.env import SegwayEnv
 from balance.utils import load_robot_model
 
 
-def show_env():
+@dataclass
+class ShowEnvSettings:
+    playback_speed: float = 0.2  # Playback speed for the simulation
+    episode_length: float = (
+        0.8  # How long until resetting the episode to start a new one.
+    )
+
+
+def show_env(settings: ShowEnvSettings):
     # Create the environment instance
     model = load_robot_model()
     env = SegwayEnv(model)
@@ -21,6 +32,7 @@ def show_env():
 
     # Optional: Launch viewer manually for testing
     viewer = mujoco.viewer.launch_passive(env._model, env._model_data)
+    viewer.cam.distance = 3.0
 
     # Simple loop to test stepping the environment
     # Apply a constant forward torque for a few steps
@@ -32,8 +44,13 @@ def show_env():
     # test_action = np.array([0.0, 0.0], dtype=np.float32) # Agent would learn to use these
 
     running = True
+    effective_timestep = env._timestep / settings.playback_speed
+    # --- Check for truncation ---
+    max_steps = int(settings.episode_length / env._timestep / env._frame_skip)
+
     try:
         while running and viewer.is_running():
+            viewer.speed = settings.playback_speed
             step_start = time.time()
 
             # In a real training loop, action would come from the agent:
@@ -61,11 +78,14 @@ def show_env():
                 # running = False
 
             # Optional: Add sleep to match wall-clock time if not using viewer.sync()
-            time_until_next_step = env._timestep * env._frame_skip - (
+            time_until_next_step = effective_timestep * env._frame_skip - (
                 time.time() - step_start
             )
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
+
+            if env._total_steps >= max_steps:
+                env.reset()
 
     except KeyboardInterrupt:
         pass
@@ -76,4 +96,5 @@ def show_env():
 
 
 if __name__ == "__main__":
-    show_env()
+    settings = tyro.cli(ShowEnvSettings)
+    show_env(settings)

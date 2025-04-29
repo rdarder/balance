@@ -12,5 +12,6 @@ dependencies = [
     "mujoco",
     "gymnasium",
     "numpy",
+    "scipy",
     # Add other direct dependencies here as needed
 ]
