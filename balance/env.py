@@ -13,16 +13,18 @@ from balance.checks import check_argument, check_state
 class SimulationSettings:
     robot_hz: float = 50.0
     simulation_hz: float = 500.0
-    max_init_pitch: float = 1.8  # Max initial pitch in rads.
+    max_init_axle_rotation: float = 1.8
 
     def __post_init__(self):
         check_argument(
-            self.simulation_hz > self.robot_hz,
-            "Simulation frequency must be greater than robot frequency",
+            self.simulation_hz >= self.robot_hz
+            or math.isclose(self.simulation_hz, self.robot_hz),
+            "Simulation frequency must be greater than or equal to robot frequency",
         )
         check_argument(
-            abs(self.simulation_hz % self.robot_hz) == 0,
-            "Simulation frequency must be a multiple of robot frequency",
+            math.isclose(self.simulation_hz % self.robot_hz, 0.0)
+            or math.isclose(self.simulation_hz % self.robot_hz, self.robot_hz),
+            "Simulation frequency must be an integer multiple of robot frequency",
         )
 
     @property
@@ -36,15 +38,17 @@ class SimulationSettings:
     @property
     def sim_frames_to_robot_frames(self):
         skip = round(self.simulation_hz / self.robot_hz)
-        return max(0, skip)
+        return max(1, skip)
 
 
 @dataclass
 class BehaviorSettings:
-    max_balanced_pitch: float = 0.5  # Max pitch to be considered balanced upright.
-    max_standing_up_pitch: float = (
+    max_balanced_roll: float = (
+        0.5  # Max axle rotation (rad) to be considered balanced upright.
+    )
+    max_standing_up_roll: float = (
         1.8
-        # Pitches above this will mean the robot has lost balance and laying down.
+        # Axle rotations above this will mean the robot has lost balance and laying down.
     )
     lay_down_grace_period: float = (
         1.0  # seconds to wait for a laying down robot to recover.
@@ -75,7 +79,6 @@ class SegwayEnv(gym.Env):
         self._sim_settings = sim_settings
         self._model = model
         self._model_data = mujoco.MjData(self._model)
-        self._sim_settings = sim_settings
         self._behavior = behavior_settings
         self._reset_settings = reset_settings
 
@@ -130,8 +133,21 @@ class SegwayEnv(gym.Env):
         )
         check_state(self._imu_gyro_id != -1, "IMU gyro not found in model")
 
-        self._left_wheel_geom = self._model.geom("left-wheel-geom")
-        self._left_wheel_body = self._model.body("left-wheel")
+        # <<< Get Chassis Body ID >>>
+        self._chassis_body_id = mujoco.mj_name2id(
+            self._model, mujoco.mjtObj.mjOBJ_BODY, "chassis"
+        )
+        check_state(self._chassis_body_id != -1, "Chassis body not found in model")
+
+        # <<< Get Wheel Geom/Body IDs needed for height calculation >>>
+        self._left_wheel_geom_id = mujoco.mj_name2id(
+            self._model, mujoco.mjtObj.mjOBJ_GEOM, "left-wheel-geom"
+        )
+        check_state(self._left_wheel_geom_id != -1, "Left wheel geom not found")
+        self._left_wheel_body_id = mujoco.mj_name2id(
+            self._model, mujoco.mjtObj.mjOBJ_BODY, "left-wheel"
+        )
+        check_state(self._left_wheel_body_id != -1, "Left wheel body not found")
 
     def set_movement_commands(self, speed: float, turn: float):
         """Sets the desired speed and turn commands for the agent to follow."""
@@ -162,10 +178,17 @@ class SegwayEnv(gym.Env):
         # Reset the MuJoCo simulation data to initial XML state first
         mujoco.mj_resetData(self._model, self._model_data)
 
-        # Set qpos
-        self._model_data.qpos[:] = self.get_initial_pose()
-        self._model_data.qvel[0:3] = self._get_initial_velocity()
-        self._model_data.qvel[3:] = 0.0  # No angular velocity
+        # --- Set Initial Pose and Velocity ---
+        # 1. Set Pose (including orientation)
+        initial_pose = self.get_initial_pose()
+        self._model_data.qpos[:] = initial_pose
+        # 2. Set Velocity (needs orientation from pose)
+        initial_orientation_quat = initial_pose[3:7]  # Get orientation set in pose
+        self._model_data.qvel[0:3] = self._get_initial_velocity(
+            initial_orientation_quat
+        )  # Pass orientation
+        self._model_data.qvel[3:] = 0.0  # No initial angular velocity
+        # ------------------------------------
 
         # --- Crucial: Forward dynamics ---
         # Apply the new qpos/qvel and compute derived quantities (like sensor readings)
@@ -182,73 +205,86 @@ class SegwayEnv(gym.Env):
         # Reset internal state
         self.episode_steps = 0
         self._episode_start_time = self._model_data.time
+        self._lay_down_start_time = None  # <<< Reset termination timer >>>
 
         info = {}
         return observation, info
 
-    def _get_initial_velocity(self):
-        # Set qvel (velocities) to a random value in the direction of the wheels
+    def _get_initial_velocity(self, orientation_quat):
+        """Calculates initial velocity based on random speed and current yaw."""
         max_speed = self._reset_settings.max_speed
         initial_speed = self.np_random.uniform(-max_speed, max_speed)
-        yaw_angle = self._model_data.qpos[
-            6
-        ]  # Yaw angle is the last element of the orientation quaternion
+
+        # --- Get Yaw from Quaternion ---
+        # Convert orientation [w, x, y, z] to rotation object
+        # Scipy expects [x, y, z, w]
+        quat_xyzw = [
+            orientation_quat[1],
+            orientation_quat[2],
+            orientation_quat[3],
+            orientation_quat[0],
+        ]
+        # noinspection PyArgumentList
+        rotation = R.from_quat(quat_xyzw)
+        # Convert to Euler angles (ZYX sequence) - Yaw is the first angle
+        euler_angles = rotation.as_euler("zyx", degrees=False)
+        yaw_angle = euler_angles[0]
+        # -----------------------------
+
         # Calculate the x and y components of the velocity based on the yaw angle
         vel_x = initial_speed * math.cos(yaw_angle)
         vel_y = initial_speed * math.sin(yaw_angle)
-        vel = vel_x, vel_y, 0.0
+        vel = np.array([vel_x, vel_y, 0.0])  # Return as numpy array
         return vel
 
     def get_initial_pose(self):
         """
         Calculates the initial pose of the robot, including position and orientation.
 
-        The height is adjusted based on the initial pitch angle to ensure the robot's
-        wheels are on the ground, even when starting with a non-zero pitch.
+        The height is adjusted based on the initial axle roll angle to ensure the robot's
+        wheels are on the ground, even when starting with a non-zero roll.
 
         Returns:
             np.ndarray: The initial pose (qpos) of the robot."""
-        pitch_angle = self.np_random.uniform(
-            -self._sim_settings.max_init_pitch,
-            self._sim_settings.max_init_pitch,
+        axle_roll_angle = self.np_random.uniform(
+            -self._sim_settings.max_init_axle_rotation,
+            self._sim_settings.max_init_axle_rotation,
         )
-        orientation = self.get_initial_orientation(pitch_angle)
+        orientation = self.get_initial_orientation(axle_roll_angle)
         qpos = np.zeros(self._model.nq)
         qpos[0] = 0.0  # Initial x position
         qpos[1] = 0.0  # Initial y position
-        qpos[2] = self._get_initial_height(pitch_angle)
+        qpos[2] = self._get_initial_height(axle_roll_angle)
         qpos[3:7] = orientation
         return qpos
 
-    def _get_initial_height(self, pitch_angle):
+    def _get_initial_height(self, axle_angle):
         """
-        Calculates the initial height adjustment based on the pitch angle.
+        Calculates the initial height adjustment based on the axle rotation angle.
 
         Args:
-            pitch_angle (float): The initial pitch angle in radians.
+            axle_angle (float): The initial rotation around the local X-axis (axle) in radians.
 
         Returns:
             float: The adjusted height."""
-        pass
-        wheel_radius = self._left_wheel_geom.size[0]
-        wheel_offset = abs(self._left_wheel_body.pos[2])
-        height = wheel_radius + wheel_offset * math.cos(pitch_angle)
-        print(
-            f"Wheel radius: {wheel_radius}\nWheel offset: {wheel_offset}\nPitch: {pitch_angle}\n"
-            f"Height: {height}"
-        )
+        wheel_radius = self._model.geom_size[self._left_wheel_geom_id][0]
+        wheel_offset_z = self._model.body_pos[self._left_wheel_body_id][2]
+        height = wheel_radius - wheel_offset_z * math.cos(axle_angle)
         return height
 
-    def get_initial_orientation(self, pitch_angle: float):
+    def get_initial_orientation(self, axle_angle: float):
+        """Calculates orientation based on random yaw and specified axle rotation (roll)."""
         yaw_angle = self.np_random.uniform(-math.pi, math.pi)
+        pitch_angle = 0.0  # Assuming zero pitch around world Y
+        roll_angle = axle_angle  # The desired rotation around the local X (axle)
 
+        # but corresponds to rotation around the final body X-axis.
+        euler_angles = [yaw_angle, pitch_angle, roll_angle]
         # noinspection PyArgumentList
-        rotation = R.from_euler(
-            "ZXY", [yaw_angle, pitch_angle, 0.0], degrees=False
-        )  # Use False since angles are in radians
+        rotation = R.from_euler("ZYX", euler_angles, degrees=False)
 
+        # Get quaternion in MuJoCo's [w, x, y, z] format
         orientation = rotation.as_quat(scalar_first=True)
-
         return orientation
 
     def step(self, action):
@@ -264,31 +300,49 @@ class SegwayEnv(gym.Env):
         observation = self._get_obs()
 
         # --- Calculate reward ---
-        reward = self._get_reward()
+        reward, info = self._get_reward()
 
         # --- Check for termination or truncation ---
         terminated = self._get_terminated_condition()
         truncated = self._get_truncated_condition()
 
-        # Example termination: Check if fallen over
-        info = {}
+        info["steps"] = self.episode_steps
+        info["axle_angle_rad"] = self._get_current_roll_rad()
+
         return observation, reward, terminated, truncated, info
 
     def _get_truncated_condition(self):
         elapsed = self._model_data.time - self._episode_start_time
-
         return elapsed > self._behavior.max_episode_duration
+
+    def _get_current_roll_rad(self) -> float:
+        """Calculates the current roll angle (rotation around local X-axis) from the chassis quaternion."""
+        # Get quaternion from data.xquat (more direct than qpos)
+        q = self._model_data.xquat[self._chassis_body_id]  # [w, x, y, z]
+
+        # noinspection PyArgumentList
+        rotation = R.from_quat(q, scalar_first=True)
+
+        # Extract Euler angles (zyx sequence: yaw, pitch, roll)
+        euler_angles = rotation.as_euler("zyx", degrees=False)
+
+        # Return the roll angle (index 2)
+        return euler_angles[2]
 
     def _get_terminated_condition(self):
         """
         Checks if the episode should be terminated based on the robot's state.
+        Uses roll angle (rotation around axle).
         """
         current_time = self._model_data.time
-        pitch_angle = self._model_data.qpos[4]
+        # <<< Use the correct angle calculation >>>
+        current_roll_rad = self._get_current_roll_rad()
 
-        # Check if the robot is laying down
-        if abs(pitch_angle) > self._behavior.max_standing_up_pitch:
+        # Check if the robot is laying down (using the setting, potentially renamed)
+        # <<< Use abs() to check tilt in either direction >>>
+        if abs(current_roll_rad) > self._behavior.max_standing_up_roll:
             if self._lay_down_start_time is None:
+                # Just fell over
                 self._lay_down_start_time = current_time
             else:
                 # Check if the robot has been laying down for too long
@@ -296,20 +350,29 @@ class SegwayEnv(gym.Env):
                     current_time - self._lay_down_start_time
                     > self._behavior.lay_down_grace_period
                 ):
-                    return True
+                    return True  # Terminated
         else:
-            # Reset the lay down timer if the robot is upright
+            # Reset the lay down timer if the robot is upright enough
             self._lay_down_start_time = None
 
-        return False
+        return False  # Not terminated
 
     def _get_reward(self):
-        pitch_angle = self._model_data.qpos[4]
-        if abs(pitch_angle) < self._behavior.max_balanced_pitch:
+        """Calculates reward based on axle rotation (roll)."""
+        info = {}
+        # <<< Use the correct angle calculation >>>
+        current_roll_rad = self._get_current_roll_rad()
+        # <<< Add angle to info dict (already done in step, but can keep here too if desired) >>>
+        info["axle_angle_rad"] = current_roll_rad
+
+        # <<< Use abs() to check tilt in either direction >>>
+        if (
+            abs(current_roll_rad) < self._behavior.max_standing_up_roll
+        ):  # Use setting (potentially renamed)
             reward = 1.0
         else:
             reward = -1.0
-        return reward
+        return reward, info
 
     def close(self):
         """Closes the viewer if it's open."""

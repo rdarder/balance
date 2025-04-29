@@ -4,10 +4,11 @@ from dataclasses import dataclass
 
 import mujoco
 import mujoco.viewer
-import numpy as np
 import tyro
+from rich.console import Console
+from rich.table import Table
 
-from balance.env import BehaviorSettings, SegwayEnv, SimulationSettings, ResetSettings
+from balance.env import BehaviorSettings, ResetSettings, SegwayEnv, SimulationSettings
 from balance.utils import load_robot_model
 
 
@@ -21,36 +22,51 @@ class ShowEnvSettings:
         return self.sim.robot_timestep / self.playback_speed
 
 
-def show_env(view: ShowEnvSettings, behavior: BehaviorSettings, reset: ResetSettings):
-    # Create the environment instance
-    model = load_robot_model()
-    env = SegwayEnv(model, view.sim, behavior, reset)
+@dataclass
+class Settings:
+    view: ShowEnvSettings
+    behavior: BehaviorSettings
+    reset: ResetSettings
 
-    # Reset the environment to get the initial state
-    obs, info = env.reset()
-    print("Initial Observation:", obs)
-    print("Observation Space:", env.observation_space)
-    print("Action Space:", env.action_space)
 
-    # Optional: Launch viewer manually for testing
-    viewer = mujoco.viewer.launch_passive(env._model, env._model_data)
-    viewer.cam.distance = 3.0
+class ShowEnv:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.console = Console()
 
-    # Simple loop to test stepping the environment
-    # Apply a constant forward torque for a few steps
-    test_action = np.array(
-        [0.5, 0.5], dtype=np.float32
-    )  # Example: apply half max torque forward
-    # Or set desired commands if you want to test that part of the observation
-    env.set_movement_commands(speed=0.8, turn=0.0)
-    # test_action = np.array([0.0, 0.0], dtype=np.float32) # Agent would learn to use these
+    def run(self):
+        # Create the environment instance
+        model = load_robot_model()
+        env = SegwayEnv(model, self.settings.view.sim, self.settings.behavior, self.settings.reset)
 
-    running = True
-    # --- Check for truncation ---
+        # Reset the environment to get the initial state
+        obs, info = env.reset()
+        print("Initial Observation:", obs)
+        print("Observation Space:", env.observation_space)
+        print("Action Space:", env.action_space)
 
-    try:
-        while running and viewer.is_running():
-            viewer.speed = view.playback_speed
+        # Optional: Launch viewer manually for testing
+        viewer = mujoco.viewer.launch_passive(env._model, env._model_data)
+        viewer.cam.distance = 3.0
+
+        env.set_movement_commands(
+            speed=(env.np_random.uniform(-1, 1)),
+            turn=(env.np_random.uniform(-1, 1))
+        )
+
+        try:
+            self.env_step(env, viewer)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            env.close()  # Close the viewer cleanly
+            if viewer is not None:
+                viewer.close()
+
+
+    def env_step(self, env: SegwayEnv, viewer: mujoco.viewer.Handle):
+        while viewer.is_running():
+            viewer.speed = self.settings.view.playback_speed
             step_start = time.time()
 
             # In a real training loop, action would come from the agent:
@@ -62,9 +78,7 @@ def show_env(view: ShowEnvSettings, behavior: BehaviorSettings, reset: ResetSett
             # Step the environment
             obs, reward, terminated, truncated, info = env.step(action)
 
-            # Print some info
-            # print(f"Sim Time: {env.data.time:.3f}, Obs: {obs[:6].round(2)}, Reward: {reward:.3f}, Terminated: {terminated}, Truncated: {truncated}")
-            # print(f"Applied Ctrl: {env.data.ctrl[env._left_motor_id]:.3f}, {env.data.ctrl[env._right_motor_id]:.3f}")
+            self.print_update(reward, info)
 
             if viewer is not None:
                 viewer.sync()  # Sync viewer with simulation data
@@ -74,27 +88,42 @@ def show_env(view: ShowEnvSettings, behavior: BehaviorSettings, reset: ResetSett
                 print("Episode finished.")
                 obs, info = env.reset()  # Reset for a new episode
                 print("Resetting environment.")
-                # Optionally break the loop after one episode for simple testing
-                # running = False
 
             # Optional: Add sleep to match wall-clock time if not using viewer.sync()
-            sleep_until_next_step(step_start, view)
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        env.close()  # Close the viewer cleanly
-        if viewer is not None:
-            viewer.close()
+            self.sleep_until_next_step(step_start)
 
 
-def sleep_until_next_step(step_started_at, view):
-    elapsed_since_robot_step = time.time() - step_started_at
-    time_until_next_robot_step = view.wall_clock_timestep - elapsed_since_robot_step
-    if time_until_next_robot_step > 0:
-        time.sleep(time_until_next_robot_step)
+    def print_update(self, reward: float, info: dict):
+
+        table = Table(title="Step Information")
+        table.add_column("Reward")
+        table.add_column("Value")
+        table.add_column("Target")
+
+        table.add_row(
+            fmt(reward), fmt(info['axle_angle_rad']), fmt(settings.behavior.max_standing_up_roll)
+        )
+
+        self.console.clear()
+        self.console.print(table)
+
+    def sleep_until_next_step(self, step_started_at):
+        elapsed_since_robot_step = time.time() - step_started_at
+        time_until_next_robot_step = (self.settings.view.wall_clock_timestep -
+                                      elapsed_since_robot_step)
+        if time_until_next_robot_step > 0:
+            time.sleep(time_until_next_robot_step)
+
+def fmt(n, places: int = 4):
+    if isinstance(n, int):
+        return str(n) + ' ' * (places+1)
+    elif isinstance(n, float):
+        return f"{n:.{places}f}"
+    else:
+        raise NotImplementedError(f"'{type(n)}' not implemented")
+
 
 
 if __name__ == "__main__":
-    app = tyro.cli(show_env)
-    app()
+    settings = tyro.cli(Settings)
+    ShowEnv(settings).run()
