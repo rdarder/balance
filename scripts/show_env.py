@@ -3,11 +3,11 @@ import time
 from dataclasses import dataclass
 
 import mujoco
-import tyro
 import mujoco.viewer
 import numpy as np
+import tyro
 
-from balance.env import SegwayEnv, SimulationSettings, BehaviorSettings
+from balance.env import BehaviorSettings, SegwayEnv, SimulationSettings, ResetSettings
 from balance.utils import load_robot_model
 
 
@@ -15,23 +15,16 @@ from balance.utils import load_robot_model
 class ShowEnvSettings:
     sim: SimulationSettings
     playback_speed: float = 0.2  # Playback speed for the simulation
-    episode_length: float = (
-        0.8  # How long until resetting the episode to start a new one.
-    )
-
-    @property
-    def max_robot_steps(self):
-        return int(self.episode_length / self.sim.robot_timestep)
 
     @property
     def wall_clock_timestep(self):
         return self.sim.robot_timestep / self.playback_speed
 
 
-def show_env(view: ShowEnvSettings, behavior: BehaviorSettings):
+def show_env(view: ShowEnvSettings, behavior: BehaviorSettings, reset: ResetSettings):
     # Create the environment instance
     model = load_robot_model()
-    env = SegwayEnv(model, view.sim, behavior)
+    env = SegwayEnv(model, view.sim, behavior, reset)
 
     # Reset the environment to get the initial state
     obs, info = env.reset()
@@ -86,9 +79,6 @@ def show_env(view: ShowEnvSettings, behavior: BehaviorSettings):
 
             # Optional: Add sleep to match wall-clock time if not using viewer.sync()
             sleep_until_next_step(step_start, view)
-
-            if env.episode_steps >= view.max_robot_steps:
-                env.reset()
 
     except KeyboardInterrupt:
         pass
