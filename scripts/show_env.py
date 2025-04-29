@@ -7,22 +7,31 @@ import tyro
 import mujoco.viewer
 import numpy as np
 
-from balance.env import SegwayEnv
+from balance.env import SegwayEnv, SimulationSettings, BehaviorSettings
 from balance.utils import load_robot_model
 
 
 @dataclass
 class ShowEnvSettings:
+    sim: SimulationSettings
     playback_speed: float = 0.2  # Playback speed for the simulation
     episode_length: float = (
         0.8  # How long until resetting the episode to start a new one.
     )
 
+    @property
+    def max_robot_steps(self):
+        return int(self.episode_length / self.sim.robot_timestep)
 
-def show_env(settings: ShowEnvSettings):
+    @property
+    def wall_clock_timestep(self):
+        return self.sim.robot_timestep / self.playback_speed
+
+
+def show_env(view: ShowEnvSettings, behavior: BehaviorSettings):
     # Create the environment instance
     model = load_robot_model()
-    env = SegwayEnv(model)
+    env = SegwayEnv(model, view.sim, behavior)
 
     # Reset the environment to get the initial state
     obs, info = env.reset()
@@ -44,13 +53,11 @@ def show_env(settings: ShowEnvSettings):
     # test_action = np.array([0.0, 0.0], dtype=np.float32) # Agent would learn to use these
 
     running = True
-    effective_timestep = env._timestep / settings.playback_speed
     # --- Check for truncation ---
-    max_steps = int(settings.episode_length / env._timestep / env._frame_skip)
 
     try:
         while running and viewer.is_running():
-            viewer.speed = settings.playback_speed
+            viewer.speed = view.playback_speed
             step_start = time.time()
 
             # In a real training loop, action would come from the agent:
@@ -78,13 +85,9 @@ def show_env(settings: ShowEnvSettings):
                 # running = False
 
             # Optional: Add sleep to match wall-clock time if not using viewer.sync()
-            time_until_next_step = effective_timestep * env._frame_skip - (
-                time.time() - step_start
-            )
-            if time_until_next_step > 0:
-                time.sleep(time_until_next_step)
+            sleep_until_next_step(step_start, view)
 
-            if env._total_steps >= max_steps:
+            if env.episode_steps >= view.max_robot_steps:
                 env.reset()
 
     except KeyboardInterrupt:
@@ -95,6 +98,13 @@ def show_env(settings: ShowEnvSettings):
             viewer.close()
 
 
+def sleep_until_next_step(step_started_at, view):
+    elapsed_since_robot_step = time.time() - step_started_at
+    time_until_next_robot_step = view.wall_clock_timestep - elapsed_since_robot_step
+    if time_until_next_robot_step > 0:
+        time.sleep(time_until_next_robot_step)
+
+
 if __name__ == "__main__":
-    settings = tyro.cli(ShowEnvSettings)
-    show_env(settings)
+    app = tyro.cli(show_env)
+    app()

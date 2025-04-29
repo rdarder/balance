@@ -8,7 +8,7 @@ class InvalidState(Exception):
         self.message = message
 
 
-class InvalidArgument(Exception):
+class InvalidArgument(ValueError):
     def __init__(self, message: str):
         self.message = message
 

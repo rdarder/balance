@@ -1,10 +1,46 @@
 import gymnasium as gym
 import numpy as np
 import mujoco
+from dataclasses import dataclass
 import math  # Import math for trigonometric functions
 from scipy.spatial.transform import Rotation as R
 
-from balance.checks import check_state
+from balance.checks import check_state, check_argument
+
+
+@dataclass
+class SimulationSettings:
+    robot_hz: float = 50.0
+    simulation_hz: float = 500.0
+    max_init_pitch: float = 1.8  # Max initial pitch in rads.
+
+    def __post_init__(self):
+        check_argument(
+            self.simulation_hz > self.robot_hz,
+            "Simulation frequency must be greater than robot frequency",
+        )
+        check_argument(
+            abs(self.simulation_hz % self.robot_hz) == 0,
+            "Simulation frequency must be a multiple of robot frequency",
+        )
+
+    @property
+    def sim_timestep(self):
+        return 1 / self.simulation_hz
+
+    @property
+    def robot_timestep(self):
+        return 1 / self.robot_hz
+
+    @property
+    def sim_frames_to_robot_frames(self):
+        skip = round(self.simulation_hz / self.robot_hz)
+        return max(0, skip)
+
+
+@dataclass
+class BehaviorSettings:
+    pass
 
 
 class SegwayEnv(gym.Env):
@@ -15,19 +51,18 @@ class SegwayEnv(gym.Env):
     def __init__(
         self,
         model: mujoco.MjModel,
-        timestep=0.002,
-        frame_skip=20,
-        max_init_pitch_angle_rad=1.8,  # Add parameter for pitch range
+        sim_settings: SimulationSettings,
+        behavior_settings: BehaviorSettings,
     ):
         super().__init__()
+        self._sim_settings = sim_settings
         self._model = model
         self._model_data = mujoco.MjData(self._model)
-        self._max_init_pitch_angle_rad = max_init_pitch_angle_rad
+        self._sim_settings = sim_settings
+        self._behavior = behavior_settings
 
         # Set simulation options (can override XML)
-        self._timestep = timestep
-        self._frame_skip = frame_skip  # Number of simulation steps per environment step
-        self._model.opt.timestep = timestep
+        self._model.opt.timestep = self._sim_settings.sim_timestep
 
         # Find actuator IDs
         self._left_motor_id = mujoco.mj_name2id(
@@ -75,7 +110,7 @@ class SegwayEnv(gym.Env):
         self._target_init_z = 0.0265 + 0.025  # = 0.0515
 
         # --- Internal State for Truncation ---
-        self._total_steps = 0
+        self.episode_steps = 0
 
     def set_movement_commands(self, speed: float, turn: float):
         """Sets the desired speed and turn commands for the agent to follow."""
@@ -124,7 +159,7 @@ class SegwayEnv(gym.Env):
         observation = self._get_obs()
 
         # Reset internal state
-        self._total_steps = 0
+        self.episode_steps = 0
 
         info = {}
         return observation, info
@@ -158,9 +193,9 @@ class SegwayEnv(gym.Env):
     def get_initial_orientation(self):
         # --- Set Random Initial Pose ---
         # 1. Random Pitch Angle (around World Y)
-        max_init_pitch_angle_rad = math.pi / 6
         pitch_angle = self.np_random.uniform(
-            -max_init_pitch_angle_rad, max_init_pitch_angle_rad
+            -self._sim_settings.max_init_pitch,
+            self._sim_settings.max_init_pitch,
         )
         # 2. Random Yaw Angle (around World Z)
         yaw_angle = self.np_random.uniform(-math.pi, math.pi)
@@ -171,6 +206,7 @@ class SegwayEnv(gym.Env):
         # Use 'zyx' convention (lowercase = extrinsic): Apply Yaw (Z), then Pitch (Y), then Roll (X)
         # Angles are given in [yaw, pitch, roll] order for 'zyx'
         euler_angles = [yaw_angle, pitch_angle, roll_angle]
+        # noinspection PyArgumentList
         rotation = R.from_euler(
             "zyx", euler_angles, degrees=False
         )  # Use False since angles are in radians
@@ -188,18 +224,18 @@ class SegwayEnv(gym.Env):
         self._model_data.ctrl[self._left_motor_id] = action[0]
         self._model_data.ctrl[self._right_motor_id] = action[1]
 
-        for _ in range(self._frame_skip):
+        for _ in range(self._sim_settings.sim_frames_to_robot_frames):
             mujoco.mj_step(self._model, self._model_data)
-            # Potential early termination check inside loop if needed
-        self._total_steps += 1
+
+        self.episode_steps += 1
 
         observation = self._get_obs()
 
         # --- Calculate reward ---
-        reward = 0.0  # Placeholder
+        reward = self._get_reward()
 
         # --- Check for termination or truncation ---
-        terminated = False
+        terminated = self._get_terminated_condition()
         truncated = False
 
         # Example termination: Check if fallen over
@@ -208,6 +244,18 @@ class SegwayEnv(gym.Env):
         )
         info = {}
         return observation, reward, terminated, truncated, info
+
+    def _get_terminated_condition(self):
+        return False
+
+    def _get_reward(self):
+        max_pitch = 0.5  # rad
+        pitch_angle = self._model_data.qpos[4]
+        if -max_pitch < pitch_angle < max_pitch:
+            reward = 1.0
+        else:
+            reward = -1.0
+        return reward
 
     def close(self):
         """Closes the viewer if it's open."""
