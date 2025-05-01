@@ -19,15 +19,15 @@
             <geom name="chassis-geom" type="box" size=".04 .011 .045" material="color-vanilla"
                   mass="0.027"/>
             <body name="left-wheel" pos="-0.048 0.002 -0.025">
-                <joint name="left-wheel-joint" type="hinge" axis="1 0 0" damping="0.0005"
-                       frictionloss="0.0001"/>
+                <joint name="left-wheel-joint" type="hinge" axis="1 0 0" damping="0.0002"
+                       frictionloss="0.00005"/>
                 <geom name="left-wheel-geom" type="cylinder" size="0.0265 0.006"
                       material="color-blue" mass="0.16"
                       euler="0 90 0"/>
             </body>
             <body name="right-wheel" pos="0.048 0.002 -0.025">
-                <joint name="right-wheel-joint" type="hinge" axis="1 0 0" damping="0.0005"
-                       frictionloss="0.0001"/>
+                <joint name="right-wheel-joint" type="hinge" axis="1 0 0" damping="0.0002"
+                       frictionloss="0.00005"/>
                 <geom type="cylinder" size="0.0265 0.006" material="color-blue"
                       mass="0.16"
                       euler="0 90 0"/>

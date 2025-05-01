@@ -1,22 +1,30 @@
-# --- Example Usage (for testing the environment) ---
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
+import os
 
+import numpy as np
 import mujoco
 import mujoco.viewer
 import tyro
 from rich.console import Console
 from rich.table import Table
+from tf_agents.trajectories import TimeStep, PolicyStep
+import tensorflow as tf
 
 from balance.env import BehaviorSettings, ResetSettings, SegwayEnv, SimulationSettings
 from balance.utils import load_robot_model
 
-
 @dataclass
 class ShowEnvSettings:
     sim: SimulationSettings
-    playback_speed: float = 0.2  # Playback speed for the simulation
-
+    playback_speed: float = 1.0  # Playback speed for the simulation
+    model_checkpoints_dir: str = "ppo_training_results/policy/"
+    use_random_policy: bool = (
+            False # When true, use a random policy instead of loading a checkpoint.
+    )
+    num_episodes: int = 10
     @property
     def wall_clock_timestep(self):
         return self.sim.robot_timestep / self.playback_speed
@@ -29,6 +37,31 @@ class Settings:
     reset: ResetSettings
 
 
+class ActionAdapter:
+    def action(self, time_step: TimeStep) ->  np.ndarray:
+        raise NotImplementedError
+
+
+class RandomAction(ActionAdapter):
+    def action(self, time_step: TimeStep) -> np.ndarray:
+        return np.random.normal(0.0, 1.0, size=(2,))
+
+
+class TfActionPlaybackAdapter(ActionAdapter):
+    def __init__(self, tf_policy):
+        self.tf_policy = tf_policy
+
+    def action(self, time_step: TimeStep) -> PolicyStep:
+        batched_time_step = tf.nest.map_structure(
+            lambda t: tf.expand_dims(tf.convert_to_tensor(t, dtype=t.dtype), 0),
+            time_step
+        )
+        action_step = self.tf_policy.action(batched_time_step)
+        action = action_step.action.numpy()[0]
+        print(action)
+        return action
+
+
 class ShowEnv:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -36,61 +69,35 @@ class ShowEnv:
 
     def run(self):
         # Create the environment instance
-        model = load_robot_model()
-        env = SegwayEnv(model, self.settings.view.sim, self.settings.behavior, self.settings.reset)
+        mujoco_model = load_robot_model()
+        env = SegwayEnv(mujoco_model, self.settings.view.sim, self.settings.behavior, self.settings.reset)
 
-        # Reset the environment to get the initial state
-        obs, info = env.reset()
-        print("Initial Observation:", obs)
-        print("Observation Space:", env.observation_space)
-        print("Action Space:", env.action_space)
-
-        # Optional: Launch viewer manually for testing
         viewer = mujoco.viewer.launch_passive(env._model, env._model_data)
-        viewer.cam.distance = 3.0
-
-        env.set_movement_commands(
-            speed=(env.np_random.uniform(-1, 1)),
-            turn=(env.np_random.uniform(-1, 1))
-        )
+        policy = self._load_policy_adapter()
 
         try:
-            self.env_step(env, viewer)
-        except KeyboardInterrupt:
-            pass
+            for i in range(settings.view.num_episodes):
+                time_step = env.reset()
+                while not time_step.is_last():
+                    if not viewer.is_running():
+                        return
+                    viewer.speed = self.settings.view.playback_speed
+                    step_start = time.time()
+                    action = policy.action(time_step)
+                    time_step = env.step(action)
+                    viewer.sync()
+                    self.sleep_until_next_step(step_start)
         finally:
             env.close()  # Close the viewer cleanly
-            if viewer is not None:
-                viewer.close()
+            viewer.close()
 
-
-    def env_step(self, env: SegwayEnv, viewer: mujoco.viewer.Handle):
-        while viewer.is_running():
-            viewer.speed = self.settings.view.playback_speed
-            step_start = time.time()
-
-            # In a real training loop, action would come from the agent:
-            # action = agent.predict(obs)
-            # For testing, use a fixed action or sample from action space
-            action = env.action_space.sample()  # Example: random actions
-            # action = test_action # Example: fixed action
-
-            # Step the environment
-            obs, reward, terminated, truncated, info = env.step(action)
-
-            self.print_update(reward, info)
-
-            if viewer is not None:
-                viewer.sync()  # Sync viewer with simulation data
-
-            # Check if episode is done
-            if terminated or truncated:
-                print("Episode finished.")
-                obs, info = env.reset()  # Reset for a new episode
-                print("Resetting environment.")
-
-            # Optional: Add sleep to match wall-clock time if not using viewer.sync()
-            self.sleep_until_next_step(step_start)
+    def _load_policy_adapter(self):
+        if self.settings.view.use_random_policy:
+            return RandomAction()
+        else:
+            policy_dir = find_latest_checkpoint(settings.view.model_checkpoints_dir)
+            saved_tf_policy = tf.saved_model.load(policy_dir)
+            return TfActionPlaybackAdapter(saved_tf_policy)
 
 
     def print_update(self, reward: float, info: dict):
@@ -121,6 +128,20 @@ def fmt(n, places: int = 4):
         return f"{n:.{places}f}"
     else:
         raise NotImplementedError(f"'{type(n)}' not implemented")
+
+def find_latest_checkpoint(path: str):
+    """Given a path, find which directory in it has the latest checkpoint.
+    List all directories within path that contain a file named saved_mode.pb.
+    Return the one that's most recent
+    """
+    candidates = []
+    for d in os.listdir(path):
+        full_path = os.path.join(path, d)
+        if os.path.isdir(full_path) and "saved_model.pb" in os.listdir(full_path):
+            candidates.append(full_path)
+    if not candidates:
+        raise FileNotFoundError(f"No policy directories with 'saved_model.pb' found in: {path}")
+    return max(candidates, key=os.path.getmtime)
 
 
 
