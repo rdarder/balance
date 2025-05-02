@@ -5,4 +5,5 @@ scripts/MUJOCO_LOG.TXT
 ppo_training_results/
 simulation_data/
 __pycache__/
+.python-version
 world_model_logs/

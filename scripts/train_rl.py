@@ -1,13 +1,16 @@
 import os
+import sys
+
+import mujoco
+from absl import app
+
+from tf_agents.system.system_multiprocessing import handle_main
 
 os.environ['TF_USE_LEGACY_KERAS'] = '1'
 os.environ['WRAPT_DISABLE_EXTENSIONS'] = 'true'
-print("Set TF_USE_LEGACY_KERAS=1 to force Keras 2 usage.")
 
 import time
-from dataclasses import dataclass, field
-from typing import Optional
-from pathlib import Path
+from dataclasses import dataclass
 
 import tensorflow as tf
 import tyro
@@ -19,10 +22,8 @@ from tf_agents.metrics import tf_metrics
 from tf_agents.policies import policy_saver
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
-from tf_agents.system.system_multiprocessing import handle_main
-
-
-from balance.observation_processing import EncoderWrapper
+from tf_agents.system.default import multiprocessing_core as mpc
+from balance.observation_processing import EncoderWrapper, WorldModelEncoderSettings
 
 from balance.env import (
     BehaviorSettings,
@@ -39,51 +40,30 @@ class PPOTrainingSettings:
 
     # Agent params
     learning_rate: float = 3e-4
-    num_epochs: int = 10  # Number of PPO epochs per data collection iteration
+    num_epochs: int = 10
     entropy_regularization: float = 0.0
     value_pred_loss_coef: float = 0.5
     importance_ratio_clipping: float = 0.2
     use_gae: bool = True
     lambda_value: float = 0.95
-    discount_factor: float = 0.99  # Agent discount factor (gamma)
+    discount_factor: float = 0.99
 
-    actor_fc_layers: tuple[int, ...] = (32, 32)
-    value_fc_layers: tuple[int, ...] = (256, 256)
+    actor_fc_layers: tuple[int, ...] = (64, 64)
+    value_fc_layers: tuple[int, ...] = (128, 128)
 
     collect_steps_per_iteration: int = 1000
     replay_buffer_capacity: int = collect_steps_per_iteration + 1
 
-    num_parallel_environments: int = 4  # Number of environments to run in parallel
+    num_parallel_environments: int = 1 # Default to 1, check added in train_eval
 
     num_iterations: int = 100_000  # Total number of training iterations
-    log_interval: int = 10  # Log metrics every N iterations
+    log_interval: int = 100  # Log metrics every N iterations
     eval_interval: int = 1_000  # Evaluate policy every N iterations
     num_eval_episodes: int = 10  # Number of episodes for evaluation
     checkpoint_interval: int = 100  # Save checkpoint every N iterations
 
     root_dir: str = "ppo_training_results"  # Directory to save results
 
-
-@dataclass
-class WorldModelEncoderSettings:
-    """Settings for using the world model encoder as observation preprocessor."""
-    use_encoder: bool = False # Set to True to enable the encoder wrapper
-    # Path to the *specific checkpoint file prefix* (e.g., ckpt-X) from world model training
-    checkpoint_path: Optional[str] = None
-    latent_dim: int = 32 # Must match the trained world model
-    # Input features dim = IMU(6) + Action(2) used during WM training
-    input_features: int = 8
-
-    def __post_init__(self):
-        if self.use_encoder:
-            if self.checkpoint_path is None:
-                raise ValueError("checkpoint_path must be provided if use_encoder is True.")
-            # Check if the index file exists, indicating a valid checkpoint prefix
-            if not Path(f"{self.checkpoint_path}.index").exists():
-                 raise FileNotFoundError(
-                     f"Checkpoint index file not found for '{self.checkpoint_path}'. "
-                     "Ensure path points to the checkpoint prefix (e.g., ckpt-X)."
-                 )
 
 @dataclass
 class Settings:
@@ -112,31 +92,44 @@ def train_eval(
     train_summary_writer.set_as_default()
 
     eval_summary_writer = tf.summary.create_file_writer(eval_dir, flush_millis=10000)
-    train_metrics = [
-        tf_metrics.AverageReturnMetric(buffer_size=ppo_settings.num_eval_episodes),
-        tf_metrics.AverageEpisodeLengthMetric(
-            buffer_size=ppo_settings.num_eval_episodes
-        ),
-    ]
 
-    global_step = tf.compat.v1.train.get_or_create_global_step()
+    # --- Define Metrics ---
+    # Metrics for data collection phase (logged every log_interval)
+    train_step_counter = tf.compat.v1.train.get_or_create_global_step() # Use global_step alias
+    # Use a buffer size reflecting recent episodes within the log interval
+    train_buffer_size = ppo_settings.num_eval_episodes # Or adjust as needed
+    train_return_metric = tf_metrics.AverageReturnMetric(
+        buffer_size=train_buffer_size, name='TrainAverageReturn', batch_size=ppo_settings.num_parallel_environments
+    )
+    train_length_metric = tf_metrics.AverageEpisodeLengthMetric(
+        buffer_size=train_buffer_size, name='TrainAverageEpisodeLength', batch_size=ppo_settings.num_parallel_environments
+    )
+    environment_steps_metric = tf_metrics.EnvironmentSteps()
+    # Number of episodes completed during collection
+    train_episodes_metric = tf_metrics.NumberOfEpisodes(name='TrainNumberOfEpisodes')
+
+    # Metrics for evaluation phase (logged every eval_interval)
+    eval_metrics = [
+        tf_metrics.AverageReturnMetric(buffer_size=ppo_settings.num_eval_episodes, name='EvalAverageReturn'),
+        tf_metrics.AverageEpisodeLengthMetric(buffer_size=ppo_settings.num_eval_episodes, name='EvalAverageEpisodeLength'),
+    ]
+    # ----------------------
 
     def env_factory():
         model = load_robot_model()
-        gym_env =  SegwayEnv(model, sim_settings, behavior_settings, reset_settings)
+        model_data = mujoco.MjData(model)
+        gym_env =  SegwayEnv(model, model_data, sim_settings, behavior_settings, reset_settings)
         return gym_env
 
-    # --- Create Training Environment (Pass world_model_settings) ---
+    # --- Create Training Environment ---
     train_tf_env = make_tf_env(
         env_factory,
         ppo_settings.num_parallel_environments,
-        world_model_settings # Pass the settings here
+        world_model_settings
     )
 
     # --- Create and Conditionally Wrap Evaluation Environment ---
-    eval_py_env = env_factory()  # Create base eval env
-
-    # Conditionally wrap the evaluation PyEnvironment
+    eval_py_env = env_factory()
     if world_model_settings.use_encoder:
         print("Wrapping evaluation environment with world model encoder.")
         try:
@@ -151,8 +144,7 @@ def train_eval(
             raise e
     else:
         print("Using raw observations for evaluation environment.")
-
-    eval_tf_env = tf_py_environment.TFPyEnvironment(eval_py_env) # Convert potentially wrapped env
+    eval_tf_env = tf_py_environment.TFPyEnvironment(eval_py_env)
     print(f"Evaluation Observation Spec: {eval_tf_env.observation_spec()}")
     # -----------------------------------------------------------
 
@@ -180,7 +172,7 @@ def train_eval(
         use_gae=ppo_settings.use_gae,
         lambda_value=ppo_settings.lambda_value,
         discount_factor=ppo_settings.discount_factor,
-        train_step_counter=global_step,
+        train_step_counter=train_step_counter, # Use the counter
         debug_summaries=False,
         summarize_grads_and_vars=False,
     )
@@ -188,51 +180,48 @@ def train_eval(
 
     # --- Replay Buffer and Data Collection ---
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-        data_spec=agent.collect_data_spec, # Uses potentially wrapped spec
+        data_spec=agent.collect_data_spec,
         batch_size=train_tf_env.batch_size,
         max_length=ppo_settings.replay_buffer_capacity,
     )
-    environment_steps_metric = tf_metrics.EnvironmentSteps()
+
+    # --- Define Collection Observers ---
+    collect_observers = [
+        replay_buffer.add_batch,
+        environment_steps_metric,
+        train_episodes_metric,
+        train_return_metric,
+        train_length_metric,
+    ]
+    # ---------------------------------
 
     collect_driver = dynamic_step_driver.DynamicStepDriver(
-        train_tf_env, # Uses potentially wrapped env
+        train_tf_env,
         agent.collect_policy,
-        observers=[
-            replay_buffer.add_batch,
-            environment_steps_metric,
-        ],
+        observers=collect_observers, # Pass the full list
         num_steps=ppo_settings.collect_steps_per_iteration,
     )
 
-    # --- Checkpointing and Saving ---
+    # --- Checkpointing ---
+    # Group metrics to be saved in the checkpoint
+    checkpoint_metrics = metric_utils.MetricsGroup(
+        [environment_steps_metric, train_episodes_metric, train_return_metric, train_length_metric] + eval_metrics,
+        name="checkpoint_metrics"
+    )
     train_checkpointer = common.Checkpointer(
         ckpt_dir=train_dir,
         agent=agent,
-        global_step=global_step,
-        metrics=metric_utils.MetricsGroup(train_metrics, "train_metrics"),
+        global_step=train_step_counter,
+        metrics=checkpoint_metrics # Save all metrics
     )
     policy_checkpointer = common.Checkpointer(
         ckpt_dir=os.path.join(train_dir, "policy"),
         policy=agent.policy,
-        global_step=global_step,
+        global_step=train_step_counter,
     )
-    model_saver = policy_saver.PolicySaver(agent.policy, train_step=global_step)
+    model_saver = policy_saver.PolicySaver(agent.policy, train_step=train_step_counter) # Keep commented out
 
     train_checkpointer.initialize_or_restore()
-
-    # --- Evaluation Function ---
-    def compute_avg_return(environment, policy, num_episodes=10):
-        total_return = 0.0
-        for _ in range(num_episodes):
-            time_step = environment.reset()
-            episode_return = 0.0
-            while not time_step.is_last():
-                action_step = policy.action(time_step)
-                time_step = environment.step(action_step.action)
-                episode_return += time_step.reward
-            total_return += episode_return
-        avg_return = total_return / num_episodes
-        return avg_return.numpy()[0]  # Extract scalar value
 
     # --- Optimize Training with tf.function ---
     collect_driver.run = common.function(collect_driver.run)
@@ -244,41 +233,73 @@ def train_eval(
     for iteration in range(ppo_settings.num_iterations):
         iter_start_time = time.time()
 
-        # --- Collect Data ---
         collect_driver.run()
-
-        # --- Train Agent ---
         experience = replay_buffer.gather_all()
+        if tf.nest.is_nested(experience) and not tf.nest.flatten(experience):
+             print(f"Warning: Iteration {iteration}: No experience gathered, skipping training.")
+             replay_buffer.clear()
+             continue
         train_loss = agent.train(experience=experience)
         replay_buffer.clear()
-
         step = agent.train_step_counter.numpy()
         iter_time = time.time() - iter_start_time
 
-        # --- Logging ---
+        # --- Logging (every log_interval) ---
         if step % ppo_settings.log_interval == 0:
-            print(
-                f"Iteration {step}: Loss = {train_loss.loss.numpy():.4f}, Time = {iter_time:.2f}s"
-            )
-            tf.summary.scalar("Agent/loss", train_loss.loss, step=step)
-            tf.summary.scalar("Timing/Iteration_Time", iter_time, step=step)
+            # Get results from training metrics
+            train_avg_return = train_return_metric.result()
+            train_avg_length = train_length_metric.result()
+            train_num_episodes = train_episodes_metric.result()
             env_steps = environment_steps_metric.result()
-            tf.summary.scalar("Environment/Steps", env_steps, step=step)
 
-        # --- Evaluation ---
+            print(
+                f"Iteration {step}: Loss = {train_loss.loss.numpy():.4f}, "
+                f"Train Return = {train_avg_return:.2f}, Train Length = {train_avg_length:.2f}, "
+                f"Episodes = {train_num_episodes}, Env Steps = {env_steps}, Time = {iter_time:.2f}s"
+            )
+            with train_summary_writer.as_default():
+                tf.summary.scalar("Agent/loss", train_loss.loss, step=step)
+                tf.summary.scalar("Timing/Iteration_Time", iter_time, step=step)
+                tf.summary.scalar("Environment/Steps", env_steps, step=step)
+                # Log training metrics to TensorBoard
+                tf.summary.scalar("Train/AverageReturn", train_avg_return, step=step)
+                tf.summary.scalar("Train/AverageEpisodeLength", train_avg_length, step=step)
+                tf.summary.scalar("Train/NumberOfEpisodes", train_num_episodes, step=step)
+
+            # Reset training metrics for the next interval
+            train_return_metric.reset()
+            train_length_metric.reset()
+            train_episodes_metric.reset()
+            # Do NOT reset environment_steps_metric, it's cumulative
+        # ------------------------------------
+
+        # --- Evaluation (every eval_interval) ---
         if step % ppo_settings.eval_interval == 0:
             eval_start_time = time.time()
-            avg_return = compute_avg_return(
-                eval_tf_env, agent.policy, ppo_settings.num_eval_episodes
+            results = metric_utils.eager_compute(
+                eval_metrics,
+                eval_tf_env,
+                agent.policy,
+                num_episodes=ppo_settings.num_eval_episodes,
+                train_step=step,
+                summary_writer=eval_summary_writer,
+                summary_prefix='Eval', # Changed prefix to Eval/
             )
             eval_time = time.time() - eval_start_time
-            print(
-                f"Iteration {step}: Average Return = {avg_return:.2f}, Eval Time = {eval_time:.2f}s"
-            )
-            with eval_summary_writer.as_default():
-                tf.summary.scalar("Metrics/AverageReturn", avg_return, step=step)
 
-        # --- Checkpointing ---
+            # Log results to console
+            eval_avg_return = results['EvalAverageReturn'].numpy() # Use updated name
+            eval_avg_length = results['EvalAverageEpisodeLength'].numpy() # Use updated name
+            print(
+                f"--- EVALUATION Iteration {step}: Average Return = {eval_avg_return:.2f}, Average Length = {eval_avg_length:.2f}, Eval Time = {eval_time:.2f}s ---"
+            )
+
+            # Reset evaluation metrics for the next evaluation run
+            for metric in eval_metrics:
+                metric.reset()
+        # -----------------------------------------
+
+        # --- Checkpointing (every checkpoint_interval) ---
         if step % ppo_settings.checkpoint_interval == 0:
             train_checkpointer.save(global_step=step)
             policy_checkpointer.save(global_step=step)
@@ -295,34 +316,25 @@ def train_eval(
     print(f"Training finished in {(time.time() - start_time):.2f} seconds.")
 
 
-# Modify the signature and add wrapping logic
 def make_tf_env(
     env_factory,
     parallel_environments: int,
-    world_model_settings: WorldModelEncoderSettings # Add this parameter
+    world_model_settings: WorldModelEncoderSettings
 ) -> tf_py_environment.TFPyEnvironment:
     """Creates a TFPyEnvironment, potentially parallel and wrapped."""
 
-    # Create the base PyEnvironment(s)
     if parallel_environments > 1:
         py_env = parallel_py_environment.ParallelPyEnvironment(
-            [env_factory] * parallel_environments
+            [env_factory for _ in range(parallel_environments)]
         )
     else:
-        py_env = env_factory() # Single base environment
+        py_env = env_factory()
 
-    # --- Conditionally Wrap the PyEnvironment(s) ---
     if world_model_settings.use_encoder:
         print("Wrapping environment with world model encoder.")
         try:
-            if parallel_environments > 1:
-                 raise ValueError(
-                     "EncoderWrapper currently supports only num_parallel_environments=1. "
-                     "Set ppo.num_parallel_environments=1 when using world_model.use_encoder=True."
-                 )
-
             py_env = EncoderWrapper(
-                environment=py_env, # Pass the single base py_env
+                environment=py_env,
                 encoder_checkpoint_path=world_model_settings.checkpoint_path,
                 latent_dim=world_model_settings.latent_dim,
                 input_features=world_model_settings.input_features
@@ -333,23 +345,19 @@ def make_tf_env(
             raise e
     else:
         print("Using raw observations from environment.")
-    # -------------------------------------------------
 
-    # Convert the potentially wrapped PyEnvironment to TFPyEnvironment
     tf_env = tf_py_environment.TFPyEnvironment(py_env)
     print(f"Final Observation Spec: {tf_env.observation_spec()}")
     return tf_env
 
 
-def main():
+def main(settings: Settings):
     # tf_agent needs a multiprocessing wrapper for main. it uses
     # https://abseil.io/docs/python/guides/app
     # which seems to be related with bazel and how python apps are run.
     # ultimately we get an extra positional parameter with the script relative path.
     # Unsure what to do with it so for now ignoring it.
 
-    settings = tyro.cli(Settings)
-    # Pass the world_model settings to train_eval
     train_eval(
         sim_settings=settings.sim,
         behavior_settings=settings.behavior,
@@ -359,4 +367,8 @@ def main():
     )
 
 if __name__ == "__main__":
-    main()
+    # mpc._STATE_SAVERS.extend(extra_state_savers)
+    mpc._INITIALIZED[0] = True
+    settings = tyro.cli(Settings)
+    print(sys.argv)
+    app.run(lambda _: main(settings), [sys.argv[0]])

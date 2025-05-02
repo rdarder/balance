@@ -76,6 +76,7 @@ class SegwayEnv(py_environment.PyEnvironment):
     def __init__(
         self,
         model: mujoco.MjModel,
+        model_data: mujoco.MjData,
         sim_settings: SimulationSettings,
         behavior_settings: BehaviorSettings,
         reset_settings: ResetSettings,
@@ -83,7 +84,7 @@ class SegwayEnv(py_environment.PyEnvironment):
 
         self._sim_settings = sim_settings
         self._model = model
-        self._model_data = mujoco.MjData(self._model)
+        self._model_data = model_data
         self._behavior = behavior_settings
         self._reset_settings = reset_settings
 
