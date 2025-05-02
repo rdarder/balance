@@ -22,8 +22,8 @@ class NullEpisodeRecoder(EpisodeRecorder):
         pass
 
 
-class FileEpisodeRecorder(EpisodeRecorder):
-    """Manages the overall recording process across multiple episodes."""
+class ImuActionEpisodeRecorder(EpisodeRecorder):
+    """Records Imu observations (6 dim) and model's preceeding actions (2 dim) into a file."""
 
     def __init__(self,
                  output_path: Path,
@@ -48,8 +48,13 @@ class FileEpisodeRecorder(EpisodeRecorder):
         print(f"Recording enabled. Output directory: {self._output_path.resolve()}")
 
     def record_step(self, time_step: TimeStep, previous_action: np.ndarray):
-        """Records a single step using the active recorder, if any."""
-        combined_input = np.concatenate([time_step.observation, previous_action]).astype(np.float32)
+        """Records a single step using the active recorder.
+
+        This recorder takes the imu readings and the model's action readings. It discards
+        the desired speed/turn observation (detrimental for training a world model).
+        """
+        combined_input = np.concatenate([time_step.observation[:6], previous_action]).astype(
+            np.float32)
         self._buffer.append(combined_input)
         if time_step.is_last():
             self._save_and_reset()
@@ -80,6 +85,7 @@ class FileEpisodeRecorder(EpisodeRecorder):
             episode_array = np.array(self._buffer)
             self._collected.append(episode_array)
             self._buffer = []
+            print(".", end="", flush=True)
         else:
             self._discarded_count += 1
 

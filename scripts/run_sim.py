@@ -10,7 +10,7 @@ import mujoco
 import mujoco.viewer
 import tyro
 
-from balance.obs_action_recording import FileEpisodeRecorder, NullEpisodeRecoder
+from balance.obs_action_recording import ImuActionEpisodeRecorder, NullEpisodeRecoder
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import TimeStep, PolicyStep
 import tensorflow as tf
@@ -118,14 +118,13 @@ class SimulationRunner:
                 self.settings.run.headless = True # Force headless if launch fails
 
         if self.settings.run.record_data:
-            recorder = FileEpisodeRecorder(self.settings.run.output_path, self.settings.run.min_episode_length)
+            recorder = ImuActionEpisodeRecorder(self.settings.run.output_path, self.settings.run.min_episode_length)
         else:
             recorder = NullEpisodeRecoder()
 
         # --- Episode Loop ---
         try:
             for i in range(self.settings.run.num_episodes):
-                print(f"\n--- Running Episode {i+1}/{self.settings.run.num_episodes} ---")
 
                 # Initialize episode state
                 time_step = env.reset()
