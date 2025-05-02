@@ -12,12 +12,11 @@ description = "A project for simulating balance with MuJoCo." # Optional descrip
 readme = "README.md" # Optional: if you have a README
 requires-python = ">=3.8" # Specify compatible Python versions
 dependencies = [
-    "mujoco",
-    "gymnasium",
-    "numpy",
+    "mujoco==3.3.2",
+    "numpy<2.0,>=1.23.5",
     "scipy",
-    "tyro",
+    "tyro==0.9.19",
     "tensorflow==2.14",
-    "tf-agents",
+    "tf-agents==0.19.0",
     # Add other direct dependencies here as needed
 ]

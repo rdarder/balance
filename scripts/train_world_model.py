@@ -1,7 +1,5 @@
 # /home/rdarder/dev/balance/scripts/train_world_model.py
 import os
-os.environ['TF_USE_LEGACY_KERAS'] = '1'
-print("Set TF_USE_LEGACY_KERAS=1 to force Keras 2 usage.")
 
 import tensorflow as tf
 import numpy as np

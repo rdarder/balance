@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +27,7 @@ from balance.observation_processing import EncoderWrapper, WorldModelEncoderSett
 class RunSettings:
     """Settings for running the simulation."""
     sim: SimulationSettings
-    model_checkpoints_dir: str = "ppo_training_results/policy/"
+    model_checkpoints_dir: str = "ppo_training_results/train/policy/"
     use_random_policy: bool = False
 
     # Visualization & Playback

@@ -1,28 +1,21 @@
 import os
-import sys
 
 import mujoco
-from absl import app
 
-from tf_agents.system.system_multiprocessing import handle_main
+from balance.tf_agents_utils import run_with_tyro_and_tfagents_mp
 
-os.environ['TF_USE_LEGACY_KERAS'] = '1'
 os.environ['WRAPT_DISABLE_EXTENSIONS'] = 'true'
-
 import time
 from dataclasses import dataclass
 
 import tensorflow as tf
-import tyro
 from tf_agents.agents.ppo import ppo_agent
 from tf_agents.drivers import dynamic_step_driver
 from tf_agents.environments import parallel_py_environment, tf_py_environment
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import tf_metrics
-from tf_agents.policies import policy_saver
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
-from tf_agents.system.default import multiprocessing_core as mpc
 from balance.observation_processing import EncoderWrapper, WorldModelEncoderSettings
 
 from balance.env import (
@@ -219,7 +212,7 @@ def train_eval(
         policy=agent.policy,
         global_step=train_step_counter,
     )
-    model_saver = policy_saver.PolicySaver(agent.policy, train_step=train_step_counter) # Keep commented out
+    # model_saver = policy_saver.PolicySaver(agent.policy, train_step=train_step_counter) # Keep commented out
 
     train_checkpointer.initialize_or_restore()
 
@@ -304,14 +297,14 @@ def train_eval(
             train_checkpointer.save(global_step=step)
             policy_checkpointer.save(global_step=step)
             saved_model_path = os.path.join(saved_model_dir, f"policy_step_{step}")
-            model_saver.save(saved_model_path)
+            # model_saver.save(saved_model_path)
             print(f"Checkpoint saved at iteration {step}")
 
     # --- Final Save ---
     train_checkpointer.save(global_step=step)
     policy_checkpointer.save(global_step=step)
     saved_model_path = os.path.join(saved_model_dir, f"policy_final_step_{step}")
-    model_saver.save(saved_model_path)
+    # model_saver.save(saved_model_path)
 
     print(f"Training finished in {(time.time() - start_time):.2f} seconds.")
 
@@ -352,12 +345,6 @@ def make_tf_env(
 
 
 def main(settings: Settings):
-    # tf_agent needs a multiprocessing wrapper for main. it uses
-    # https://abseil.io/docs/python/guides/app
-    # which seems to be related with bazel and how python apps are run.
-    # ultimately we get an extra positional parameter with the script relative path.
-    # Unsure what to do with it so for now ignoring it.
-
     train_eval(
         sim_settings=settings.sim,
         behavior_settings=settings.behavior,
@@ -367,8 +354,4 @@ def main(settings: Settings):
     )
 
 if __name__ == "__main__":
-    # mpc._STATE_SAVERS.extend(extra_state_savers)
-    mpc._INITIALIZED[0] = True
-    settings = tyro.cli(Settings)
-    print(sys.argv)
-    app.run(lambda _: main(settings), [sys.argv[0]])
+    run_with_tyro_and_tfagents_mp(settings_cls=Settings, main_func=main)
