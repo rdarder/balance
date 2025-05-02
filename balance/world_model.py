@@ -1,7 +1,6 @@
 import tensorflow as tf
-import keras
 
-class TrainingEncoderNetwork(keras.Model):
+class TrainingEncoderNetwork(tf.keras.Model):
     """
     Encoder RNN designed for training the world model.
     Processes sequences and returns the full sequence of hidden states,
@@ -19,7 +18,7 @@ class TrainingEncoderNetwork(keras.Model):
         # GRU Layer configured for training:
         # - return_sequences: True to get hidden state for each step.
         # - return_state: True to also get the final state explicitly (useful for consistency).
-        self.gru_layer = keras.layers.GRU(
+        self.gru_layer = tf.keras.layers.GRU(
             units=self.latent_dim,
             return_sequences=True,
             return_state=True,
@@ -67,7 +66,7 @@ class TrainingEncoderNetwork(keras.Model):
         return cls(**config)
 
 
-class InferenceEncoderNetwork(keras.Model):
+class InferenceEncoderNetwork(tf.keras.Model):
     """
     Encoder RNN designed for step-by-step inference (e.g., in simulation).
     Uses a stateful GRU to maintain the hidden state internally across calls.
@@ -93,7 +92,7 @@ class InferenceEncoderNetwork(keras.Model):
         #                      Here, steps=1 because we feed one step at a time.
         # Note: The internal weights (kernels, biases) are compatible with the
         #       non-stateful GRU layer in EncoderRNN_Training if latent_dim matches.
-        self.gru_layer = keras.layers.GRU(
+        self.gru_layer = tf.keras.layers.GRU(
             units=self.latent_dim,
             return_sequences=False, # Output is the state for the single step
             return_state=False,    # State is managed internally, output *is* the state
@@ -159,7 +158,7 @@ class InferenceEncoderNetwork(keras.Model):
         return cls(**config)
 
 
-class PredictorMLP(keras.Model):
+class PredictorMLP(tf.keras.Model):
     """
     Predicts the next latent state given the current latent state and action.
     Uses a simple MLP architecture.
@@ -178,12 +177,12 @@ class PredictorMLP(keras.Model):
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
 
-        self.hidden_layer = keras.layers.Dense(
+        self.hidden_layer = tf.keras.layers.Dense(
             units=self.hidden_dim,
             activation='relu',
             name="predictor_hidden"
         )
-        self.output_layer = keras.layers.Dense(
+        self.output_layer = tf.keras.layers.Dense(
             units=self.latent_dim,
             activation=None,
             name="predictor_output"

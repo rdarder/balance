@@ -1,8 +1,13 @@
-# /home/rdarder/dev/balance/scripts/train_ppo.py
-
 import os
+
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+os.environ['WRAPT_DISABLE_EXTENSIONS'] = 'true'
+print("Set TF_USE_LEGACY_KERAS=1 to force Keras 2 usage.")
+
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
+from pathlib import Path
 
 import tensorflow as tf
 import tyro
@@ -16,6 +21,8 @@ from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
 from tf_agents.system.system_multiprocessing import handle_main
 
+
+from balance.observation_processing import EncoderWrapper
 
 from balance.env import (
     BehaviorSettings,
@@ -48,13 +55,35 @@ class PPOTrainingSettings:
 
     num_parallel_environments: int = 4  # Number of environments to run in parallel
 
-    num_iterations: int = 1_000_000  # Total number of training iterations
-    log_interval: int = 500  # Log metrics every N iterations
-    eval_interval: int = 10_000  # Evaluate policy every N iterations
+    num_iterations: int = 100_000  # Total number of training iterations
+    log_interval: int = 10  # Log metrics every N iterations
+    eval_interval: int = 1_000  # Evaluate policy every N iterations
     num_eval_episodes: int = 10  # Number of episodes for evaluation
-    checkpoint_interval: int = 10_000  # Save checkpoint every N iterations
+    checkpoint_interval: int = 100  # Save checkpoint every N iterations
 
     root_dir: str = "ppo_training_results"  # Directory to save results
+
+
+@dataclass
+class WorldModelEncoderSettings:
+    """Settings for using the world model encoder as observation preprocessor."""
+    use_encoder: bool = False # Set to True to enable the encoder wrapper
+    # Path to the *specific checkpoint file prefix* (e.g., ckpt-X) from world model training
+    checkpoint_path: Optional[str] = None
+    latent_dim: int = 32 # Must match the trained world model
+    # Input features dim = IMU(6) + Action(2) used during WM training
+    input_features: int = 8
+
+    def __post_init__(self):
+        if self.use_encoder:
+            if self.checkpoint_path is None:
+                raise ValueError("checkpoint_path must be provided if use_encoder is True.")
+            # Check if the index file exists, indicating a valid checkpoint prefix
+            if not Path(f"{self.checkpoint_path}.index").exists():
+                 raise FileNotFoundError(
+                     f"Checkpoint index file not found for '{self.checkpoint_path}'. "
+                     "Ensure path points to the checkpoint prefix (e.g., ckpt-X)."
+                 )
 
 @dataclass
 class Settings:
@@ -62,12 +91,15 @@ class Settings:
     behavior: BehaviorSettings
     reset: ResetSettings
     ppo: PPOTrainingSettings
+    world_model: WorldModelEncoderSettings
+
 
 def train_eval(
     sim_settings: SimulationSettings,
     behavior_settings: BehaviorSettings,
     reset_settings: ResetSettings,
     ppo_settings: PPOTrainingSettings,
+    world_model_settings: WorldModelEncoderSettings,
 ):
     """Main training and evaluation function."""
 
@@ -94,13 +126,35 @@ def train_eval(
         gym_env =  SegwayEnv(model, sim_settings, behavior_settings, reset_settings)
         return gym_env
 
-    train_tf_env = make_tf_env(env_factory, ppo_settings.num_parallel_environments)
-    eval_py_env = env_factory()  # Separate env for evaluation
-    eval_tf_env = tf_py_environment.TFPyEnvironment(eval_py_env)
+    # --- Create Training Environment (Pass world_model_settings) ---
+    train_tf_env = make_tf_env(
+        env_factory,
+        ppo_settings.num_parallel_environments,
+        world_model_settings # Pass the settings here
+    )
 
-    print("Observation Spec:", train_tf_env.observation_spec())
-    print("Action Spec:", train_tf_env.action_spec())
-    print("TimeStep Spec:", train_tf_env.time_step_spec())
+    # --- Create and Conditionally Wrap Evaluation Environment ---
+    eval_py_env = env_factory()  # Create base eval env
+
+    # Conditionally wrap the evaluation PyEnvironment
+    if world_model_settings.use_encoder:
+        print("Wrapping evaluation environment with world model encoder.")
+        try:
+            eval_py_env = EncoderWrapper(
+                environment=eval_py_env,
+                encoder_checkpoint_path=world_model_settings.checkpoint_path,
+                latent_dim=world_model_settings.latent_dim,
+                input_features=world_model_settings.input_features
+            )
+        except Exception as e:
+            print(f"FATAL: Failed to initialize EncoderWrapper for evaluation: {e}")
+            raise e
+    else:
+        print("Using raw observations for evaluation environment.")
+
+    eval_tf_env = tf_py_environment.TFPyEnvironment(eval_py_env) # Convert potentially wrapped env
+    print(f"Evaluation Observation Spec: {eval_tf_env.observation_spec()}")
+    # -----------------------------------------------------------
 
     # --- Agent and Network Setup ---
     optimizer = tf.keras.optimizers.Adam(learning_rate=ppo_settings.learning_rate)
@@ -126,24 +180,22 @@ def train_eval(
         use_gae=ppo_settings.use_gae,
         lambda_value=ppo_settings.lambda_value,
         discount_factor=ppo_settings.discount_factor,
-        # normalize_observations=True, # Consider adding normalization layers
-        # normalize_rewards=True,      # Consider reward normalization
         train_step_counter=global_step,
-        debug_summaries=False,  # Set True for more detailed TensorBoard logs
+        debug_summaries=False,
         summarize_grads_and_vars=False,
     )
     agent.initialize()
 
     # --- Replay Buffer and Data Collection ---
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
-        data_spec=agent.collect_data_spec,
-        batch_size=train_tf_env.batch_size,  # Matches num_parallel_environments
+        data_spec=agent.collect_data_spec, # Uses potentially wrapped spec
+        batch_size=train_tf_env.batch_size,
         max_length=ppo_settings.replay_buffer_capacity,
     )
     environment_steps_metric = tf_metrics.EnvironmentSteps()
 
     collect_driver = dynamic_step_driver.DynamicStepDriver(
-        train_tf_env,
+        train_tf_env, # Uses potentially wrapped env
         agent.collect_policy,
         observers=[
             replay_buffer.add_batch,
@@ -152,6 +204,7 @@ def train_eval(
         num_steps=ppo_settings.collect_steps_per_iteration,
     )
 
+    # --- Checkpointing and Saving ---
     train_checkpointer = common.Checkpointer(
         ckpt_dir=train_dir,
         agent=agent,
@@ -192,14 +245,12 @@ def train_eval(
         iter_start_time = time.time()
 
         # --- Collect Data ---
-        collect_time_step = train_tf_env.current_time_step()  # Get initial state if needed
-        collect_driver.run()  # Fills the replay buffer
+        collect_driver.run()
 
         # --- Train Agent ---
-        # Sample all data collected in this iteration
         experience = replay_buffer.gather_all()
         train_loss = agent.train(experience=experience)
-        replay_buffer.clear()  # Clear buffer for next on-policy iteration
+        replay_buffer.clear()
 
         step = agent.train_step_counter.numpy()
         iter_time = time.time() - iter_start_time
@@ -209,11 +260,8 @@ def train_eval(
             print(
                 f"Iteration {step}: Loss = {train_loss.loss.numpy():.4f}, Time = {iter_time:.2f}s"
             )
-            # Log training loss and other agent metrics
             tf.summary.scalar("Agent/loss", train_loss.loss, step=step)
-            # Log time per iteration
             tf.summary.scalar("Timing/Iteration_Time", iter_time, step=step)
-            # Log number of environment steps collected
             env_steps = environment_steps_metric.result()
             tf.summary.scalar("Environment/Steps", env_steps, step=step)
 
@@ -227,16 +275,13 @@ def train_eval(
             print(
                 f"Iteration {step}: Average Return = {avg_return:.2f}, Eval Time = {eval_time:.2f}s"
             )
-            # Log evaluation metrics
             with eval_summary_writer.as_default():
                 tf.summary.scalar("Metrics/AverageReturn", avg_return, step=step)
-                # You could add AverageEpisodeLength here too if needed
 
         # --- Checkpointing ---
         if step % ppo_settings.checkpoint_interval == 0:
             train_checkpointer.save(global_step=step)
             policy_checkpointer.save(global_step=step)
-            # Save the policy in SavedModel format for deployment/inference
             saved_model_path = os.path.join(saved_model_dir, f"policy_step_{step}")
             model_saver.save(saved_model_path)
             print(f"Checkpoint saved at iteration {step}")
@@ -250,27 +295,68 @@ def train_eval(
     print(f"Training finished in {(time.time() - start_time):.2f} seconds.")
 
 
-def make_tf_env(env_factory, parallel_environments):
+# Modify the signature and add wrapping logic
+def make_tf_env(
+    env_factory,
+    parallel_environments: int,
+    world_model_settings: WorldModelEncoderSettings # Add this parameter
+) -> tf_py_environment.TFPyEnvironment:
+    """Creates a TFPyEnvironment, potentially parallel and wrapped."""
+
+    # Create the base PyEnvironment(s)
     if parallel_environments > 1:
-        return tf_py_environment.TFPyEnvironment(
-            parallel_py_environment.ParallelPyEnvironment(
-                [env_factory] * parallel_environments
-            )
+        py_env = parallel_py_environment.ParallelPyEnvironment(
+            [env_factory] * parallel_environments
         )
     else:
-        return  tf_py_environment.TFPyEnvironment(env_factory())
+        py_env = env_factory() # Single base environment
+
+    # --- Conditionally Wrap the PyEnvironment(s) ---
+    if world_model_settings.use_encoder:
+        print("Wrapping environment with world model encoder.")
+        try:
+            if parallel_environments > 1:
+                 raise ValueError(
+                     "EncoderWrapper currently supports only num_parallel_environments=1. "
+                     "Set ppo.num_parallel_environments=1 when using world_model.use_encoder=True."
+                 )
+
+            py_env = EncoderWrapper(
+                environment=py_env, # Pass the single base py_env
+                encoder_checkpoint_path=world_model_settings.checkpoint_path,
+                latent_dim=world_model_settings.latent_dim,
+                input_features=world_model_settings.input_features
+            )
+            print(f"Using EncoderWrapper.")
+        except Exception as e:
+            print(f"FATAL: Failed to initialize EncoderWrapper: {e}")
+            raise e
+    else:
+        print("Using raw observations from environment.")
+    # -------------------------------------------------
+
+    # Convert the potentially wrapped PyEnvironment to TFPyEnvironment
+    tf_env = tf_py_environment.TFPyEnvironment(py_env)
+    print(f"Final Observation Spec: {tf_env.observation_spec()}")
+    return tf_env
 
 
-def main(script_path: str):
+def main():
     # tf_agent needs a multiprocessing wrapper for main. it uses
     # https://abseil.io/docs/python/guides/app
     # which seems to be related with bazel and how python apps are run.
     # ultimately we get an extra positional parameter with the script relative path.
     # Unsure what to do with it so for now ignoring it.
 
-    settings= tyro.cli(Settings)
-    train_eval(sim_settings=settings.sim, behavior_settings=settings.behavior,
-               reset_settings=settings.reset, ppo_settings=settings.ppo)
+    settings = tyro.cli(Settings)
+    # Pass the world_model settings to train_eval
+    train_eval(
+        sim_settings=settings.sim,
+        behavior_settings=settings.behavior,
+        reset_settings=settings.reset,
+        ppo_settings=settings.ppo,
+        world_model_settings=settings.world_model
+    )
 
 if __name__ == "__main__":
-    handle_main(main)
+    main()

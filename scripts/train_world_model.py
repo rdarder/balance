@@ -1,7 +1,9 @@
 # /home/rdarder/dev/balance/scripts/train_world_model.py
+import os
+os.environ['TF_USE_LEGACY_KERAS'] = '1'
+print("Set TF_USE_LEGACY_KERAS=1 to force Keras 2 usage.")
 
 import tensorflow as tf
-import keras
 import numpy as np
 import tyro
 from dataclasses import dataclass, field
@@ -161,8 +163,8 @@ def build_dataset(
 def train_step(
     encoder: TrainingEncoderNetwork,
     predictor: PredictorMLP,
-    optimizer: keras.optimizers.Optimizer,
-    loss_fn: keras.losses.Loss,
+    optimizer: tf.keras.optimizers.Optimizer,
+    loss_fn: tf.keras.losses.Loss,
     subsequences: tf.Tensor, # Shape: (batch, warmup+pred, features)
     actions: tf.Tensor,      # Shape: (batch, pred, action_dim)
     warmup_steps: int,
@@ -215,7 +217,7 @@ def train_step(
 def validation_step(
     encoder: TrainingEncoderNetwork,
     predictor: PredictorMLP,
-    loss_fn: keras.losses.Loss,
+    loss_fn: tf.keras.losses.Loss,
     subsequences: tf.Tensor,
     actions: tf.Tensor,
     warmup_steps: int,
@@ -293,8 +295,8 @@ def run_training(settings: Settings):
         action_dim=ACTION_DIM,
         hidden_dim=settings.model.predictor_hidden_dim
     )
-    optimizer = keras.optimizers.Adam(learning_rate=settings.train.learning_rate)
-    loss_fn = keras.losses.MeanSquaredError()
+    optimizer = tf.keras.optimizers.Adam(learning_rate=settings.train.learning_rate)
+    loss_fn = tf.keras.losses.MeanSquaredError()
 
     # --- Build models (optional but good practice) ---
     # Create dummy input shapes to build the models explicitly
@@ -327,8 +329,8 @@ def run_training(settings: Settings):
     # --- Training Loop ---
     print("Starting training...")
     start_time = time.time()
-    train_loss_metric = keras.metrics.Mean(name='train_loss')
-    latent_std_metric = keras.metrics.Mean(name='latent_std')
+    train_loss_metric = tf.keras.metrics.Mean(name='train_loss')
+    latent_std_metric = tf.keras.metrics.Mean(name='latent_std')
 
     # Use tf.range for the loop if using @tf.function on the outer loop (not done here)
     for step in range(int(checkpoint.step), settings.train.num_train_steps):
@@ -370,7 +372,7 @@ def run_training(settings: Settings):
         # --- Validation ---
         if step % settings.train.eval_interval == 0:
             print(f"--- Running Validation at Step {step} ---")
-            val_loss_metric = keras.metrics.Mean(name='val_loss')
+            val_loss_metric = tf.keras.metrics.Mean(name='val_loss')
             # Typically run validation over a fixed number of batches or the whole val set
             num_val_batches = 50 # Example: run on 50 batches
             for _ in range(num_val_batches):

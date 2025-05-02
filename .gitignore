@@ -4,3 +4,5 @@ balance.egg-info
 scripts/MUJOCO_LOG.TXT
 ppo_training_results/
 simulation_data/
+__pycache__/
+world_model_logs/
