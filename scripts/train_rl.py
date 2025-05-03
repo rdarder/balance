@@ -1,10 +1,9 @@
 import os
+os.environ['WRAPT_DISABLE_EXTENSIONS'] = 'true'
 
 import mujoco
 
 from balance.tf_agents_utils import run_with_tyro_and_tfagents_mp
-
-os.environ['WRAPT_DISABLE_EXTENSIONS'] = 'true'
 import time
 from dataclasses import dataclass
 
@@ -41,8 +40,8 @@ class PPOTrainingSettings:
     lambda_value: float = 0.95
     discount_factor: float = 0.99
 
-    actor_fc_layers: tuple[int, ...] = (64, 64)
-    value_fc_layers: tuple[int, ...] = (128, 128)
+    actor_fc_layers: tuple[int, ...] = (32, 32)
+    value_fc_layers: tuple[int, ...] = (64, 64)
 
     collect_steps_per_iteration: int = 1000
     replay_buffer_capacity: int = collect_steps_per_iteration + 1
@@ -53,7 +52,7 @@ class PPOTrainingSettings:
     log_interval: int = 100  # Log metrics every N iterations
     eval_interval: int = 1_000  # Evaluate policy every N iterations
     num_eval_episodes: int = 10  # Number of episodes for evaluation
-    checkpoint_interval: int = 100  # Save checkpoint every N iterations
+    checkpoint_interval: int = 1000  # Save checkpoint every N iterations
 
     root_dir: str = "ppo_training_results"  # Directory to save results
 
@@ -168,6 +167,7 @@ def train_eval(
         train_step_counter=train_step_counter, # Use the counter
         debug_summaries=False,
         summarize_grads_and_vars=False,
+        normalize_observations=False,
     )
     agent.initialize()
 

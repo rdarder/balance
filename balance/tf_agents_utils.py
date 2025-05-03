@@ -5,6 +5,9 @@ from typing import TypeVar, Type, Callable
 
 import tyro
 from absl import app
+import tensorflow as tf
+
+from tf_agents.policies import TFPolicy
 from tf_agents.system.default import multiprocessing_core as mpc
 
 T = TypeVar("T") # Generic type for settings dataclass
@@ -38,3 +41,30 @@ def run_with_tyro_and_tfagents_mp(
     finally:
         sys.argv = original_argv
 
+
+def print_policy_names(policy: TFPolicy):
+    try:
+        # Ensure variables are created if not already
+        if not policy.variables():
+            _ = policy.get_initial_state(batch_size=1) # Trigger variable creation
+        for var in policy.variables():
+            print(f"  Name: {var.name}, Shape: {var.shape}")
+    except Exception as e:
+        print(f"  Error inspecting tf_policy variables: {e}")
+
+
+def inspect_checkpoint_variables(ckpt_dir: str):
+    """Finds the latest checkpoint and prints the variable names within it."""
+    print(f"Looking for latest checkpoint in: {ckpt_dir}")
+    latest_ckpt = tf.train.latest_checkpoint(ckpt_dir)
+    if not latest_ckpt:
+        raise Exception(f"  ERROR: No checkpoint found in {ckpt_dir}")
+    print(f"Found latest checkpoint prefix: {latest_ckpt}")
+    print("\n--- Variables Found in Checkpoint File ---")
+
+    variables_in_ckpt = tf.train.list_variables(latest_ckpt)
+    if not variables_in_ckpt:
+        print("  WARNING: No variables found in the checkpoint file!")
+    else:
+        for name, shape in variables_in_ckpt:
+            print(f"  Name: {name}, Shape: {shape}")
